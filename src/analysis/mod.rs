@@ -2,12 +2,20 @@ pub mod access_control;
 pub mod dos;
 pub mod information_exposure;
 pub mod jwt;
+<<<<<<< HEAD
 pub mod jwt_tests;
 pub mod utils;
 
 use self::utils::user_types;
 use crate::config::PatternConfig;
 use crate::types::{Finding, GqlSchema, SchemaStats};
+=======
+pub mod scoring;
+
+use crate::config::PatternConfig;
+use crate::types::{Finding, GqlSchema, SchemaStats};
+use crate::utils::user_types;
+>>>>>>> update-research-refs
 
 pub fn analyze(
     schema: &GqlSchema,

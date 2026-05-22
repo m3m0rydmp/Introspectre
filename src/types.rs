@@ -84,19 +84,19 @@ fragment TypeRef on __Type {
 }
 "#;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct IntrospectionResponse {
     pub data: Option<IntrospectionData>,
     pub errors: Option<Vec<GqlError>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct IntrospectionData {
     #[serde(rename = "__schema")]
     pub schema: GqlSchema,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GqlSchema {
     pub query_type: Option<NamedRef>,
@@ -107,6 +107,13 @@ pub struct GqlSchema {
 }
 
 impl GqlSchema {
+<<<<<<< HEAD
+=======
+    pub fn find_type(&self, name: &str) -> Option<&GqlType> {
+        self.types.iter().find(|t| t.name.as_deref() == Some(name))
+    }
+
+>>>>>>> update-research-refs
     pub fn fields_for_type(&self, type_name: Option<&str>) -> Vec<&GqlField> {
         let name = match type_name {
             Some(n) => n,
@@ -165,6 +172,10 @@ mod tests {
                 }]),
                 input_fields: None,
                 enum_values: None,
+<<<<<<< HEAD
+=======
+                possible_types: None,
+>>>>>>> update-research-refs
             }],
         };
         let fields = schema.fields_for_type(Some("Query"));
@@ -176,17 +187,21 @@ mod tests {
     }
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Deserialize)]
+=======
+#[derive(Debug, Deserialize, Serialize)]
+>>>>>>> update-research-refs
 pub struct NamedRef {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GqlDirective {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GqlType {
     pub kind: Option<String>,
@@ -196,9 +211,10 @@ pub struct GqlType {
     pub fields: Option<Vec<GqlField>>,
     pub input_fields: Option<Vec<GqlInputField>>,
     pub enum_values: Option<Vec<GqlEnumValue>>,
+    pub possible_types: Option<Vec<GqlTypeRef>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GqlField {
     pub name: String,
@@ -209,14 +225,14 @@ pub struct GqlField {
     pub args: Option<Vec<GqlArg>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GqlArg {
     pub name: String,
     #[serde(rename = "type")]
     pub arg_type: Option<GqlTypeRef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GqlInputField {
     pub name: String,
     #[serde(rename = "type")]
@@ -224,7 +240,7 @@ pub struct GqlInputField {
     pub field_type: Option<GqlTypeRef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GqlEnumValue {
     pub name: String,
@@ -232,7 +248,7 @@ pub struct GqlEnumValue {
     pub is_deprecated: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GqlTypeRef {
     pub kind: Option<String>,
     pub name: Option<String>,
@@ -254,7 +270,11 @@ impl GqlTypeRef {
     }
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Deserialize)]
+=======
+#[derive(Debug, Deserialize, Serialize)]
+>>>>>>> update-research-refs
 pub struct GqlError {
     pub message: String,
 }
@@ -269,6 +289,8 @@ pub enum Severity {
     Medium,
     #[serde(rename = "high")]
     High,
+    #[serde(rename = "critical")]
+    Critical,
 }
 
 impl std::str::FromStr for Severity {
@@ -280,6 +302,7 @@ impl std::str::FromStr for Severity {
             "low" => Ok(Severity::Low),
             "medium" | "med" => Ok(Severity::Medium),
             "high" => Ok(Severity::High),
+            "critical" | "crit" => Ok(Severity::Critical),
             other => Err(format!("Unknown severity: {}", other)),
         }
     }
@@ -292,6 +315,7 @@ impl std::fmt::Display for Severity {
             Severity::High => write!(f, "HIGH"),
             Severity::Medium => write!(f, "MEDIUM"),
             Severity::Low => write!(f, "LOW"),
+            Severity::Critical => write!(f, "CRITICAL"),
         }
     }
 }
@@ -338,15 +362,58 @@ impl std::fmt::Display for Confidence {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum AffectedLocation {
+    #[serde(rename = "type")]
+    Type(String),
+    #[serde(rename = "field")]
+    Field(String, String), // Type, Field
+    #[serde(rename = "argument")]
+    Argument(String, String, String), // Type, Field, Arg
+}
+
+impl std::fmt::Display for AffectedLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AffectedLocation::Type(t) => write!(f, "{}", t),
+            AffectedLocation::Field(t, fi) => write!(f, "{}.{}", t, fi),
+            AffectedLocation::Argument(t, fi, a) => write!(f, "{}.{}({})", t, fi, a),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FindingStatus {
+    #[serde(rename = "inferred")]
+    Inferred,
+    #[serde(rename = "possible")]
+    Possible,
+    #[serde(rename = "confirmed")]
+    Confirmed,
+}
+
+impl std::fmt::Display for FindingStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FindingStatus::Inferred => write!(f, "INFERRED"),
+            FindingStatus::Possible => write!(f, "POSSIBLE"),
+            FindingStatus::Confirmed => write!(f, "CONFIRMED"),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct Finding {
     pub id: &'static str,
     pub severity: Severity,
     pub title: &'static str,
     pub description: String,
-    pub affected: Vec<String>,
+    pub affected: Vec<AffectedLocation>,
     pub remediation: &'static str,
+    pub first_step: Option<String>,
     pub references: Vec<&'static str>,
+    pub status: FindingStatus,
     pub confidence: Confidence,
     pub evidence_level: EvidenceLevel,
     pub poc: Option<String>,

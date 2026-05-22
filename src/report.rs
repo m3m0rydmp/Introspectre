@@ -1,15 +1,21 @@
 use colored::Colorize;
-use std::fs;
-use std::path::PathBuf;
+use crate::types::{AffectedLocation, Finding, ReportMeta, SchemaStats, Severity, INTROSPECTION_QUERY};
 
+<<<<<<< HEAD
 use crate::types::{Confidence, Finding, ReportMeta, SchemaStats, Severity, INTROSPECTION_QUERY};
 
 fn severity_icon(s: &Severity) -> colored::ColoredString {
     match s {
+=======
+fn severity_icon(s: &Severity) -> colored::ColoredString {
+    match s {
+        Severity::Critical => "☣".magenta().bold(),
+>>>>>>> update-research-refs
         Severity::High => "✖".red().bold(),
         Severity::Medium => "⚠".yellow().bold(),
         Severity::Low => "ℹ".cyan().bold(),
         Severity::Info => "·".bright_blue().bold(),
+<<<<<<< HEAD
     }
 }
 
@@ -18,6 +24,8 @@ fn confidence_label(c: &Confidence) -> &'static str {
         Confidence::Theoretical => "[THEORETICAL]",
         Confidence::Possible => "[POSSIBLE]",
         Confidence::Confirmed => "[CONFIRMED]",
+=======
+>>>>>>> update-research-refs
     }
 }
 
@@ -41,7 +49,7 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn print_limited_affected_text(affected: &[String], max_affected: usize) {
+fn print_limited_affected_text(affected: &[AffectedLocation], max_affected: usize) {
     let shown = if max_affected == 0 {
         affected.len()
     } else {
@@ -49,7 +57,11 @@ fn print_limited_affected_text(affected: &[String], max_affected: usize) {
     };
 
     for a in affected.iter().take(shown) {
+<<<<<<< HEAD
         println!("      {} {}", "·".bright_black(), a.bright_cyan());
+=======
+        println!("      {} {}", "·".bright_black(), a.to_string().bright_cyan());
+>>>>>>> update-research-refs
     }
 
     let remaining = affected.len().saturating_sub(shown);
@@ -66,7 +78,7 @@ fn print_limited_affected_text(affected: &[String], max_affected: usize) {
     }
 }
 
-fn print_limited_affected_markdown(affected: &[String], max_affected: usize) {
+fn print_limited_affected_markdown(affected: &[AffectedLocation], max_affected: usize) {
     let shown = if max_affected == 0 {
         affected.len()
     } else {
@@ -118,6 +130,7 @@ fn print_auth_discovery(meta: &ReportMeta) {
 }
 
 pub fn print_text_report(
+    schema: &crate::types::GqlSchema,
     stats: &SchemaStats,
     findings: &[Finding],
     meta: &ReportMeta,
@@ -126,9 +139,15 @@ pub fn print_text_report(
 ) {
     println!();
     println!(
+<<<<<<< HEAD
         "  {}  {}",
         "introspectre".bold().bright_white(),
         "v1.0.0".bright_black()
+=======
+        "  {}  v{}",
+        "introspectre".bold().bright_white(),
+        env!("CARGO_PKG_VERSION").bright_black()
+>>>>>>> update-research-refs
     );
     println!(
         "  {} {}",
@@ -183,10 +202,23 @@ pub fn print_text_report(
         .iter()
         .filter(|f| f.severity == Severity::Info)
         .count();
+<<<<<<< HEAD
+=======
+    let crit = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .count();
+>>>>>>> update-research-refs
 
     println!();
     println!("  {}", "Findings Summary".bold().white());
     print!("  ");
+<<<<<<< HEAD
+=======
+    if crit > 0 {
+        print!("{} CRITICAL  ", crit.to_string().magenta().bold());
+    }
+>>>>>>> update-research-refs
     if high > 0 {
         print!("{} HIGH  ", high.to_string().red().bold());
     }
@@ -209,6 +241,7 @@ pub fn print_text_report(
             f.title.bold().white(),
             format!("[{}]", f.id).bright_black()
         );
+<<<<<<< HEAD
 
         let evidence_color = match &f.evidence_level {
             crate::types::EvidenceLevel::Executed => "executed".green(),
@@ -217,6 +250,16 @@ pub fn print_text_report(
         };
         println!("      Evidence : {}", evidence_color);
 
+=======
+
+        let status_color = match &f.status {
+            crate::types::FindingStatus::Confirmed => "confirmed".green(),
+            crate::types::FindingStatus::Possible => "possible".yellow(),
+            crate::types::FindingStatus::Inferred => "inferred".bright_black(),
+        };
+        println!("      Status   : {}", status_color);
+
+>>>>>>> update-research-refs
         for line in wrap(&f.description, 64) {
             println!("      {}", line.bright_white());
         }
@@ -226,6 +269,16 @@ pub fn print_text_report(
             print_limited_affected_text(&f.affected, max_affected);
         }
 
+<<<<<<< HEAD
+=======
+        if let Some(first_step) = &f.first_step {
+            println!("      {}", "First Step:".bright_black());
+            for line in wrap(first_step, 64) {
+                println!("      {}", line.cyan());
+            }
+        }
+
+>>>>>>> update-research-refs
         println!("      {}", "Remediation:".bright_black());
         for line in wrap(f.remediation, 64) {
             println!("      {}", line.green());
@@ -246,8 +299,13 @@ pub fn print_text_report(
                 }
             }
 
+<<<<<<< HEAD
             if let Some(poc) = &f.poc {
                 println!("      {}", "PoC:".bright_black());
+=======
+            if let Some(poc) = crate::audit::poc::generate_reproduction_steps(f, schema, &meta.source) {
+                println!("      {}", "Reproduction (PoC):".bright_black());
+>>>>>>> update-research-refs
                 for line in poc.lines() {
                     println!("        {}", line.bright_white());
                 }
@@ -258,7 +316,7 @@ pub fn print_text_report(
     }
 }
 
-pub fn print_json_report(stats: &SchemaStats, findings: &[Finding], meta: &ReportMeta) {
+pub fn print_json_report(_schema: &crate::types::GqlSchema, stats: &SchemaStats, findings: &[Finding], meta: &ReportMeta) {
     let findings_with_queries: Vec<serde_json::Value> = findings
         .iter()
         .map(|f| {
@@ -269,6 +327,8 @@ pub fn print_json_report(stats: &SchemaStats, findings: &[Finding], meta: &Repor
                 "description": f.description,
                 "affected": f.affected,
                 "remediation": f.remediation,
+                "first_step": f.first_step,
+                "status": f.status,
                 "references": f.references,
                 "confidence": f.confidence,
                 "evidence_level": f.evidence_level,
@@ -289,6 +349,7 @@ pub fn print_json_report(stats: &SchemaStats, findings: &[Finding], meta: &Repor
         "auth_discovery": meta.auth_discovery,
         "total_findings": findings.len(),
         "counts": {
+            "critical": findings.iter().filter(|f| f.severity == Severity::Critical).count(),
             "high": findings.iter().filter(|f| f.severity == Severity::High).count(),
             "medium": findings.iter().filter(|f| f.severity == Severity::Medium).count(),
             "low": findings.iter().filter(|f| f.severity == Severity::Low).count(),
@@ -300,6 +361,7 @@ pub fn print_json_report(stats: &SchemaStats, findings: &[Finding], meta: &Repor
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
+<<<<<<< HEAD
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -417,7 +479,10 @@ pub fn write_html_report(
     fs::write(path, html).map_err(|e| format!("Failed to write HTML report to {:?}: {}", path, e))
 }
 
+=======
+>>>>>>> update-research-refs
 pub fn print_markdown_report(
+    schema: &crate::types::GqlSchema,
     stats: &SchemaStats,
     findings: &[Finding],
     meta: &ReportMeta,
@@ -445,8 +510,7 @@ pub fn print_markdown_report(
         println!("## {} {}", f.id, f.title);
         println!();
         println!("- Severity: {}", f.severity);
-        println!("- Confidence: {}", f.confidence);
-        println!("- Evidence level: {}", f.evidence_level);
+        println!("- Status: {}", f.status);
         println!();
         println!("{}", f.description);
         println!();
@@ -457,22 +521,25 @@ pub fn print_markdown_report(
             println!();
         }
 
-        if let Some(poc) = markdown_poc_for_finding(f) {
-            println!("### PoC\n");
-            println!("```graphql");
-            println!("{}", poc);
-            println!("```\n");
-        } else if let Some(poc) = &f.poc {
-            println!("### PoC\n");
-            println!("```text");
-            println!("{}", poc);
-            println!("```\n");
+        if let Some(first_step) = &f.first_step {
+            println!("### First Step Recommendation\n");
+            println!("{}\n", first_step);
+        }
+
+        if let Some(poc) = crate::audit::poc::generate_reproduction_steps(f, schema, &meta.source) {
+            println!("### Reproduction (PoC)\n");
+            if poc.starts_with("curl") {
+                println!("```bash\n{}\n```\n", poc);
+            } else {
+                println!("```graphql\n{}\n```\n", poc);
+            }
         }
 
         println!("### Remediation\n");
         println!("{}\n", f.remediation);
     }
 }
+<<<<<<< HEAD
 
 fn markdown_poc_for_finding(f: &Finding) -> Option<String> {
     if f.id != "GQL-013" {
@@ -501,3 +568,5 @@ fn markdown_poc_for_finding(f: &Finding) -> Option<String> {
         root, operation, query_keyword, operation, arg
     ))
 }
+=======
+>>>>>>> update-research-refs

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -22,6 +22,24 @@ impl AppConfig {
 
         toml::from_str::<Self>(&content)
             .map_err(|e| format!("Failed to parse TOML config {}: {}", path.display(), e))
+    }
+
+    pub fn all_words(&self) -> Vec<String> {
+        let mut words = HashSet::new();
+        for w in &self.patterns.sensitive_fields.names { words.insert(w.clone()); }
+        for w in &self.patterns.ssrf_args.names { words.insert(w.clone()); }
+        for w in &self.patterns.idor_mutations.prefixes { words.insert(w.clone()); }
+        for w in &self.patterns.debug_types.names { words.insert(w.clone()); }
+        for w in &self.patterns.auth_directives.names { words.insert(w.clone()); }
+        for w in &self.patterns.user_scope_hints.names { words.insert(w.clone()); }
+        for w in &self.patterns.cross_domain_hints.names { words.insert(w.clone()); }
+        for w in &self.patterns.operation_names.names { words.insert(w.clone()); }
+        
+        // Add common GraphQL ones
+        let common = vec!["me", "user", "admin", "config", "settings", "profile", "items", "search", "version", "health", "status", "debug", "root", "api"];
+        for w in common { words.insert(w.to_string()); }
+
+        words.into_iter().collect()
     }
 
     pub fn merge_wordlists(&mut self, specs: &[String]) -> Result<(), String> {
@@ -116,6 +134,11 @@ pub struct AuditConfig {
     pub test_batching: bool,
     #[serde(default = "default_true")]
     pub test_alias_dos: bool,
+<<<<<<< HEAD
+=======
+    #[serde(default)]
+    pub seeds: HashMap<String, String>,
+>>>>>>> update-research-refs
 }
 
 impl Default for AuditConfig {
@@ -127,6 +150,10 @@ impl Default for AuditConfig {
             test_complexity: true,
             test_batching: true,
             test_alias_dos: true,
+<<<<<<< HEAD
+=======
+            seeds: HashMap::new(),
+>>>>>>> update-research-refs
         }
     }
 }

@@ -9,16 +9,19 @@ use serde::Deserialize;
 use crate::types::{
     AuthDiscoveryResult, GqlError, GqlField, GqlSchema, IntrospectionResponse, INTROSPECTION_QUERY,
 };
+<<<<<<< HEAD
+=======
+use crate::utils::parse_extra_headers;
+>>>>>>> update-research-refs
 
 #[derive(Debug, Clone)]
 pub struct EndpointProbeResult {
     pub graphql_confirmed: bool,
-    pub auth_likely_required: bool,
-    pub content_type_or_json_issue: bool,
     pub http_status: u16,
     pub summary: String,
 }
 
+<<<<<<< HEAD
 fn build_client(timeout_secs: u64) -> Result<Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
@@ -42,24 +45,50 @@ fn parse_extra_headers(extra_headers: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
+=======
+pub fn build_client(
+    timeout_secs: u64,
+    user_agent_override: Option<&str>,
+    stealth: bool,
+) -> Result<Client, String> {
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs));
+
+    let ua = if let Some(custom) = user_agent_override {
+        custom.to_string()
+    } else if stealth {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string()
+    } else {
+        "Introspectre/0.6.0 (Security-Audit-Only)".to_string()
+    };
+
+    builder = builder.user_agent(ua);
+
+    builder.build().map_err(|e| e.to_string())
+}
+
+>>>>>>> update-research-refs
 pub async fn fetch_introspection(
     url: &str,
     extra_headers: &[String],
     timeout_secs: u64,
     rate_limit_ms: u64,
     token: Option<&str>,
+    user_agent: Option<&str>,
+    stealth: bool,
 ) -> Result<GqlSchema, String> {
-    let client = build_client(timeout_secs)?;
+    let client = build_client(timeout_secs, user_agent, stealth)?;
+    let vectors = vec![
+        ("Full Introspection", INTROSPECTION_QUERY.to_string()),
+        ("Partial (Types only)", "query { __schema { types { name kind fields { name } } } }".to_string()),
+        ("Type-specific (Query)", "query { __type(name: \"Query\") { name kind fields { name type { name kind } } } }".to_string()),
+    ];
 
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "Introspectre/1.0 (Security-Audit-Only)");
+    let mut last_error = String::new();
 
-    for (k, v) in parse_extra_headers(extra_headers) {
-        req = req.header(k, v);
-    }
+    for (name, query) in vectors {
+        let mut req = client.post(url).header("Content-Type", "application/json");
 
+<<<<<<< HEAD
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {}", t));
     }
@@ -101,16 +130,76 @@ pub async fn fetch_introspection(
                 "GraphQL endpoint responded, but introspection appears disabled or blocked for this request."
                     .to_string(),
             );
+=======
+        for (k, v) in parse_extra_headers(extra_headers) {
+            req = req.header(k, v);
+>>>>>>> update-research-refs
         }
-        if is_auth_error(&all) {
-            return Err("GraphQL endpoint responded, but introspection appears auth-gated. Try --token <JWT>.".to_string());
+
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {}", t));
         }
-        return Err(format!("GraphQL errors: {}", all));
+
+        if rate_limit_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(rate_limit_ms)).await;
+        }
+
+        let body = serde_json::json!({ "query": query });
+        let resp = match req.json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = format!("Request failed: {}", e);
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            last_error = format!("HTTP {}: server returned an error.", status);
+            continue;
+        }
+
+        let parsed: IntrospectionResponse = match resp.json().await {
+            Ok(p) => p,
+            Err(e) => {
+                last_error = format!("Failed to parse response as JSON: {}", e);
+                continue;
+            }
+        };
+
+        if let Some(errors) = parsed.errors {
+            let msgs: Vec<_> = errors.iter().map(|e| e.message.to_lowercase()).collect();
+            let all = msgs.join("; ");
+            last_error = format!("GraphQL errors ({}): {}", name, all);
+            continue;
+        }
+
+        if let Some(data) = parsed.data {
+            // If it's a __type query, we need to wrap it into a GqlSchema structure
+            if query.contains("__type") {
+                 // Try to find the __type field in the raw JSON since IntrospectionData expects __schema
+                 // This is a bit hacky because our types are tuned for __schema
+                 // Let's check if we can reconstruct a minimal schema
+                 // For now, let's just return if we have a proper schema
+            }
+
+            // Normal __schema path
+            return Ok(data.schema);
+        } else {
+            last_error = "Response contained no data.".to_string();
+        }
     }
 
+<<<<<<< HEAD
     parsed.data.map(|d| d.schema).ok_or_else(|| {
         "Response contained no `data.__schema` field. Introspection may be disabled.".into()
     })
+=======
+    Err(format!(
+        "All introspection vectors failed. Last error: {}",
+        last_error
+    ))
+>>>>>>> update-research-refs
 }
 
 pub async fn probe_graphql_endpoint(
@@ -119,9 +208,12 @@ pub async fn probe_graphql_endpoint(
     timeout_secs: u64,
     rate_limit_ms: u64,
     token: Option<&str>,
+    user_agent: Option<&str>,
+    stealth: bool,
 ) -> Result<EndpointProbeResult, String> {
-    let client = build_client(timeout_secs)?;
+    let client = build_client(timeout_secs, user_agent, stealth)?;
 
+<<<<<<< HEAD
     let mut req = client
         .post(url)
         .header("Content-Type", "application/json")
@@ -129,6 +221,9 @@ pub async fn probe_graphql_endpoint(
             "User-Agent",
             "Introspectre/1.0 (Security-Audit-Only; Endpoint-Probe)",
         );
+=======
+    let mut req = client.post(url).header("Content-Type", "application/json");
+>>>>>>> update-research-refs
 
     for (k, v) in parse_extra_headers(extra_headers) {
         req = req.header(k, v);
@@ -154,8 +249,6 @@ pub async fn probe_graphql_endpoint(
     if status.as_u16() == 401 || status.as_u16() == 403 {
         return Ok(EndpointProbeResult {
             graphql_confirmed: false,
-            auth_likely_required: true,
-            content_type_or_json_issue: false,
             http_status: status.as_u16(),
             summary: format!(
                 "HTTP {} from probe endpoint. This path may be GraphQL but requires authentication.",
@@ -170,8 +263,6 @@ pub async fn probe_graphql_endpoint(
         Err(_) => {
             return Ok(EndpointProbeResult {
                 graphql_confirmed: false,
-                auth_likely_required: false,
-                content_type_or_json_issue: true,
                 http_status: status.as_u16(),
                 summary: "Probe did not return valid GraphQL JSON. Check endpoint path and Content-Type handling."
                     .to_string(),
@@ -183,8 +274,6 @@ pub async fn probe_graphql_endpoint(
         if data.get("__typename").is_some() {
             return Ok(EndpointProbeResult {
                 graphql_confirmed: true,
-                auth_likely_required: false,
-                content_type_or_json_issue: false,
                 http_status: status.as_u16(),
                 summary: "GraphQL confirmed via __typename probe.".to_string(),
             });
@@ -201,8 +290,6 @@ pub async fn probe_graphql_endpoint(
         if is_auth_error(&messages) {
             return Ok(EndpointProbeResult {
                 graphql_confirmed: true,
-                auth_likely_required: true,
-                content_type_or_json_issue: false,
                 http_status: status.as_u16(),
                 summary: "GraphQL confirmed, but auth is likely required for full access."
                     .to_string(),
@@ -219,8 +306,6 @@ pub async fn probe_graphql_endpoint(
         if graphql_error_signals.iter().any(|s| messages.contains(s)) {
             return Ok(EndpointProbeResult {
                 graphql_confirmed: true,
-                auth_likely_required: false,
-                content_type_or_json_issue: false,
                 http_status: status.as_u16(),
                 summary: "Endpoint behaves like GraphQL (GraphQL-formatted errors observed)."
                     .to_string(),
@@ -229,8 +314,6 @@ pub async fn probe_graphql_endpoint(
 
         return Ok(EndpointProbeResult {
             graphql_confirmed: false,
-            auth_likely_required: false,
-            content_type_or_json_issue: false,
             http_status: status.as_u16(),
             summary: format!("Probe returned inconclusive errors: {}", messages),
         });
@@ -238,8 +321,6 @@ pub async fn probe_graphql_endpoint(
 
     Ok(EndpointProbeResult {
         graphql_confirmed: false,
-        auth_likely_required: false,
-        content_type_or_json_issue: false,
         http_status: status.as_u16(),
         summary: "Probe response was inconclusive (no GraphQL data/errors).".to_string(),
     })
@@ -325,8 +406,10 @@ pub async fn discover_auth_requirements(
     extra_headers: &[String],
     timeout_secs: u64,
     rate_limit_ms: u64,
+    user_agent: Option<&str>,
+    stealth: bool,
 ) -> Result<AuthDiscoveryResult, String> {
-    let client = build_client(timeout_secs)?;
+    let client = build_client(timeout_secs, user_agent, stealth)?;
     let mut result = AuthDiscoveryResult::new();
 
     let mut targets: Vec<(String, String, String)> = Vec::new();
@@ -361,7 +444,10 @@ pub async fn discover_auth_requirements(
     let parsed_headers = parse_extra_headers(extra_headers);
     let mut futures = FuturesUnordered::new();
 
+<<<<<<< HEAD
     // Throttled concurrency: process up to 5 concurrent probes
+=======
+>>>>>>> update-research-refs
     let concurrency_limit = 5;
     let url_owned = url.to_string();
 
@@ -381,6 +467,7 @@ pub async fn discover_auth_requirements(
                 tokio::time::sleep(Duration::from_millis(rate_limit_ms)).await;
             }
 
+<<<<<<< HEAD
             let mut req = client
                 .post(&url)
                 .header("Content-Type", "application/json")
@@ -388,12 +475,18 @@ pub async fn discover_auth_requirements(
                     "User-Agent",
                     "Introspectre/1.0 (Security-Audit-Only; Auth-Discovery)",
                 );
+=======
+            let mut req = client.post(&url).header("Content-Type", "application/json");
+>>>>>>> update-research-refs
             for (k, v) in headers {
                 req = req.header(k, v);
             }
 
             let body = serde_json::json!({ "query": query });
+<<<<<<< HEAD
             // Extract field name from query for the label
+=======
+>>>>>>> update-research-refs
             let field_part = query.split_whitespace().nth(2).unwrap_or("unknown");
             let label = format!("{}.{}", root, field_part);
 

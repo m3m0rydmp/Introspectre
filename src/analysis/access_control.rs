@@ -1,7 +1,13 @@
+<<<<<<< HEAD
 use crate::analysis::utils::matches_pattern;
 use crate::config::PatternConfig;
 use crate::types::{Confidence, EvidenceLevel, Finding, GqlSchema, Severity};
 use std::collections::HashSet;
+=======
+use crate::utils::matches_pattern;
+use crate::config::PatternConfig;
+use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
+>>>>>>> update-research-refs
 
 pub fn check_access_control(
     schema: &GqlSchema,
@@ -33,14 +39,26 @@ pub fn check_access_control(
             ),
             affected: mutation_fields
                 .iter()
+<<<<<<< HEAD
                 .map(|f| format!("Mutation.{}", f.name))
                 .take(20)
                 .collect(),
             remediation: "Use schema-level auth directives (graphql-shield, graphql-authz, or server-specific auth plugins). Every mutation that modifies data should require explicit authorization.",
+=======
+                .map(|f| AffectedLocation::Field("Mutation".into(), f.name.clone()))
+                .take(20)
+                .collect(),
+            remediation: "Use schema-level auth directives (graphql-shield, graphql-authz, or server-specific auth plugins). Every mutation that modifies data should require explicit authorization.",
+            first_step: Some("Check the server's documentation or configuration to see how mutations are protected if not through directives.".into()),
+>>>>>>> update-research-refs
             references: vec![
                 "OWASP API1: Broken Object Level Authorization",
                 "OWASP API5: Broken Function Level Authorization",
             ],
+<<<<<<< HEAD
+=======
+            status: FindingStatus::Inferred,
+>>>>>>> update-research-refs
             confidence: Confidence::Theoretical,
             evidence_level: EvidenceLevel::Inferred,
             poc: None,
@@ -59,10 +77,19 @@ pub fn check_access_control(
             ),
             affected: sub_fields
                 .iter()
+<<<<<<< HEAD
                 .map(|f| format!("Subscription.{}", f.name))
                 .collect(),
             remediation: "Require authentication for all subscriptions. Enforce per-user connection limits and rate-limit subscription creation. Validate all subscription filter payloads server-side.",
             references: vec!["CWE-770: Allocation of Resources Without Limits"],
+=======
+                .map(|f| AffectedLocation::Field("Subscription".into(), f.name.clone()))
+                .collect(),
+            remediation: "Require authentication for all subscriptions. Enforce per-user connection limits and rate-limit subscription creation. Validate all subscription filter payloads server-side.",
+            first_step: Some("Attempt to connect to the subscription endpoint without a token to see if it allows the connection.".into()),
+            references: vec!["CWE-770: Allocation of Resources Without Limits"],
+            status: FindingStatus::Inferred,
+>>>>>>> update-research-refs
             confidence: Confidence::Theoretical,
             evidence_level: EvidenceLevel::Inferred,
             poc: None,
@@ -78,9 +105,17 @@ pub fn check_access_control(
                 "{} mutations are exposed. A large mutation surface increases the probability of missing access controls, mass-assignment vulnerabilities, and IDOR issues.",
                 mutation_fields.len()
             ),
+<<<<<<< HEAD
             affected: vec![format!("{} total mutations", mutation_fields.len())],
             remediation: "Audit each mutation for authorization requirements. Consider splitting schemas by role/context, or use persisted/allow-listed queries to limit operations.",
             references: vec!["OWASP API6: Mass Assignment", "CWE-915: Improperly Controlled Modification"],
+=======
+            affected: vec![AffectedLocation::Type("Mutation".into())],
+            remediation: "Audit each mutation for authorization requirements. Consider splitting schemas by role/context, or use persisted/allow-listed queries to limit operations.",
+            first_step: Some("Focus your audit on high-impact mutations like those that modify users, roles, or financial data.".into()),
+            references: vec!["OWASP API6: Mass Assignment", "CWE-915: Improperly Controlled Modification"],
+            status: FindingStatus::Inferred,
+>>>>>>> update-research-refs
             confidence: Confidence::Theoretical,
             evidence_level: EvidenceLevel::Inferred,
             poc: None,
@@ -94,21 +129,30 @@ pub fn check_access_control(
             || lower.ends_with("_id")
     };
 
+<<<<<<< HEAD
     let mut idor_candidates: HashSet<String> = HashSet::new();
+=======
+    let mut idor_possibilities: Vec<AffectedLocation> = Vec::new();
+>>>>>>> update-research-refs
     let query_fields = schema.fields_for_type(query_name);
     for (root_name, fields) in [("Query", &query_fields), ("Mutation", &mutation_fields)] {
         for field in fields {
             if let Some(args) = &field.args {
                 for arg in args {
                     if idor_arg_matches(&arg.name) {
+<<<<<<< HEAD
                         idor_candidates
                             .insert(format!("{}.{}({})", root_name, field.name, arg.name));
+=======
+                        idor_possibilities.push(AffectedLocation::Argument(root_name.into(), field.name.clone(), arg.name.clone()));
+>>>>>>> update-research-refs
                     }
                 }
             }
         }
     }
 
+<<<<<<< HEAD
     if !idor_candidates.is_empty() {
         let mut sorted_candidates: Vec<String> = idor_candidates.into_iter().collect();
         sorted_candidates.sort();
@@ -123,26 +167,51 @@ pub fn check_access_control(
             affected: sorted_candidates.into_iter().take(30).collect(),
             remediation: "Enforce object-level authorization on every resolver that accepts identifiers (id, uuid, *Id, *_id). Validate caller ownership before returning or mutating records.",
             references: vec!["OWASP API1: Broken Object Level Authorization", "CWE-639: Authorization Bypass Through User-Controlled Key"],
+=======
+    if !idor_possibilities.is_empty() {
+        findings.push(Finding {
+            id: "GQL-013",
+            severity: Severity::Medium,
+            title: "IDOR Possibility Detection",
+            description: format!(
+                "{} query/mutation argument(s) appear to accept object identifiers. These are potential BOLA/IDOR possibilities if ownership checks are missing server-side.",
+                idor_possibilities.len()
+            ),
+            affected: idor_possibilities.into_iter().take(30).collect(),
+            remediation: "Enforce object-level authorization on every resolver that accepts identifiers (id, uuid, *Id, *_id). Validate caller ownership before returning or mutating records.",
+            first_step: Some("Identify a field that takes an ID and attempt to query it with an ID belonging to a different user.".into()),
+            references: vec!["OWASP API1: Broken Object Level Authorization", "CWE-639: Authorization Bypass Through User-Controlled Key"],
+            status: FindingStatus::Inferred,
+>>>>>>> update-research-refs
             confidence: Confidence::Possible,
             evidence_level: EvidenceLevel::Inferred,
             poc: None,
         });
     }
 
+<<<<<<< HEAD
     let mut ssrf_candidates: HashSet<String> = HashSet::new();
+=======
+    let mut ssrf_possibilities: Vec<AffectedLocation> = Vec::new();
+>>>>>>> update-research-refs
     for (root_name, fields) in [("Query", &query_fields), ("Mutation", &mutation_fields)] {
         for field in fields {
             if let Some(args) = &field.args {
                 for arg in args {
                     if matches_pattern(&arg.name, &patterns.ssrf_args.names) {
+<<<<<<< HEAD
                         ssrf_candidates
                             .insert(format!("{}.{}({})", root_name, field.name, arg.name));
+=======
+                        ssrf_possibilities.push(AffectedLocation::Argument(root_name.into(), field.name.clone(), arg.name.clone()));
+>>>>>>> update-research-refs
                     }
                 }
             }
         }
     }
 
+<<<<<<< HEAD
     if !ssrf_candidates.is_empty() {
         let mut sorted_candidates: Vec<String> = ssrf_candidates.into_iter().collect();
         sorted_candidates.sort();
@@ -157,6 +226,22 @@ pub fn check_access_control(
             affected: sorted_candidates.into_iter().take(30).collect(),
             remediation: "Block internal network destinations, enforce strict URL allow-lists, and isolate outbound fetchers. Never allow resolver-controlled requests to metadata or loopback addresses.",
             references: vec!["OWASP API8: Injection", "CWE-918: Server-Side Request Forgery (SSRF)"],
+=======
+    if !ssrf_possibilities.is_empty() {
+        findings.push(Finding {
+            id: "GQL-014",
+            severity: Severity::Medium,
+            title: "SSRF Possibility Detection",
+            description: format!(
+                "{} query/mutation argument(s) match SSRF-related URL/webhook patterns. If backend services fetch these values, SSRF may be possible.",
+                ssrf_possibilities.len()
+            ),
+            affected: ssrf_possibilities.into_iter().take(30).collect(),
+            remediation: "Block internal network destinations, enforce strict URL allow-lists, and isolate outbound fetchers. Never allow resolver-controlled requests to metadata or loopback addresses.",
+            first_step: Some("Provide a URL to a Burp Collaborator or similar listener to see if the server makes an outbound request.".into()),
+            references: vec!["OWASP API8: Injection", "CWE-918: Server-Side Request Forgery (SSRF)"],
+            status: FindingStatus::Inferred,
+>>>>>>> update-research-refs
             confidence: Confidence::Possible,
             evidence_level: EvidenceLevel::Inferred,
             poc: None,
