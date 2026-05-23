@@ -1,6 +1,5 @@
 # Introspectre
 
-<<<<<<< HEAD
 Introspectre is a comprehensive security analysis and auditing utility designed for GraphQL schemas. The tool integrates static schema analysis with active probing to detect vulnerabilities such as Insecure Direct Object References (IDOR), Mass Assignment, Sensitive Data Exposure, and various Denial of Service (DoS) attack vectors.
 
 ## Installation and Setup
@@ -40,11 +39,9 @@ Commands:
   audit  Execute intrusive active probes (Injection, IDOR, DoS, CSRF)
   file   Analyze a local introspection JSON file
   help   Display help information
->>>>>>> update-research-refs
 ```
 The compiled binary will be available at `./target/release/introspectre`.
 
-<<<<<<< HEAD
 ### Platform Dependencies
 *   **Linux:** Systems require `pkg-config` and OpenSSL development headers (e.g., `libssl-dev` or `openssl-devel`).
 *   **Windows:** Requires Visual Studio Build Tools with the "Desktop development with C++" workload.
@@ -127,4 +124,4 @@ introspectre audit https://api.target.com/graphql --idor-payloads "1,2,3"
 Customize sensitive patterns and probe behavior in `config.toml`.
 
 Refer to [ARCHITECTURE.md](./ARCHITECTURE.md) for deep technical specifications and heuristics.
->>>>>>> update-research-refs
+
