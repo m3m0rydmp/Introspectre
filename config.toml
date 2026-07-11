@@ -1,0 +1,34 @@
+[patterns.sensitive_fields]
+names = ["email", "username", "phone", "mpin", "wallet_id", "mobile_number"]
+
+[patterns.ssrf_args]
+names = ["url", "webhook", "callback", "redirect", "endpoint", "image_url"]
+
+[patterns.idor_mutations]
+prefixes = ["delete", "remove", "update", "download", "export"]
+
+[patterns.debug_types]
+names = ["admin", "internal", "debug", "private", "test", "dev", "staging"]
+
+[patterns.auth_directives]
+names = ["auth", "authenticated", "authorized", "isAuthenticated", "requiresAuth", "hasRole", "permission", "authorize"]
+
+[patterns.user_scope_hints]
+names = ["userid", "user_id", "ownerid", "owner_id", "email"]
+
+[patterns.cross_domain_hints]
+names = ["programdata", "program_data", "paymentinfo", "payment_info", "privatecomment", "private_comment", "reportsources", "report_sources"]
+
+[patterns.operation_names]
+names = []
+
+[session]
+auth_header = "Authorization=Bearer YOUR_TOKEN_HERE"
+user_id = ""
+owned_ids = []
+
+[audit]
+test_unauth = true
+test_idor = true
+test_injection = true # Disabled by default for safety. Set to true to enable SQLi/XSS/SSRF probes.
+

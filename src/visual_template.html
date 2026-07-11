@@ -1,0 +1,1952 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Introspectre - Actionable Schema Visualization</title>
+    {{VENDOR_JS}}
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --bg-elev: #12121a;
+            --panel: #0f1119;
+            --border: #22253a;
+            --text: #d7e0ea;
+            --muted: #7a8296;
+            --accent: #FCEE0A;
+            --cyan: #00F0FF;
+            --magenta: #FF2A6D;
+            --high: #FF2A6D;
+            --med: #FCEE0A;
+            --low: #1BE7B5;
+            --info: #00F0FF;
+            --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: var(--sans);
+            background-color: var(--bg);
+            color: var(--text);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        h1, h2, h3, h4, h5, h6,
+        button, .tag, .tab-btn, .toggle-btn, .graph-btn, .view-report-btn,
+        .close-modal, .report-stat strong, .seed-group h4, .tree-label,
+        #node-search, .instruction-toast b {
+            font-family: var(--mono);
+        }
+
+        #cy {
+            flex-grow: 1;
+            height: 100%;
+        }
+
+        #sidebar {
+            width: 450px;
+            background-color: var(--panel);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            overflow-y: auto;
+            box-shadow: 5px 0 15px rgba(0,0,0,0.6), 0 0 24px rgba(0,240,255,0.06);
+        }
+
+        .header {
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 1.2rem;
+            margin: 0;
+            color: var(--accent);
+            letter-spacing: 0.02em;
+            text-shadow: 0 0 8px rgba(252,238,10,0.45), 0 0 20px rgba(252,238,10,0.15);
+        }
+
+        .header .meta {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-top: 5px;
+        }
+
+        .card {
+            background-color: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+
+        .card h3 {
+            margin-top: 0;
+            font-size: 1rem;
+        }
+
+        .severity-high { border-left: 4px solid var(--high); box-shadow: inset 0 0 20px rgba(255,42,109,0.08); }
+        .severity-medium { border-left: 4px solid var(--med); box-shadow: inset 0 0 20px rgba(252,238,10,0.06); }
+        .severity-low { border-left: 4px solid var(--low); }
+        .severity-info { border-left: 4px solid var(--info); }
+
+        pre {
+            background-color: var(--bg-elev);
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            border: 1px solid var(--border);
+            font-family: var(--mono);
+        }
+
+        button {
+            background-color: var(--bg-elev);
+            border: 1px solid var(--border);
+            color: var(--accent);
+            padding: 5px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            margin-right: 5px;
+            margin-top: 5px;
+        }
+
+        button:hover {
+            background-color: var(--border);
+            border-color: var(--accent);
+        }
+
+        .finding-item {
+            cursor: pointer;
+            padding: 8px;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            border: 1px solid transparent;
+        }
+
+        .finding-item:hover {
+            background-color: var(--bg-elev);
+            border-color: var(--border);
+        }
+
+        .finding-item.active {
+            background-color: rgba(0,240,255,0.12);
+            border-color: var(--cyan);
+        }
+
+        .search-container {
+            padding: 10px 0;
+            position: relative;
+        }
+        #node-search {
+            width: 100%;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            background: var(--bg-elev);
+            color: var(--text);
+            box-sizing: border-box;
+        }
+        #node-search:focus {
+            outline: none;
+            border-color: var(--cyan);
+            box-shadow: 0 0 0 1px var(--cyan), 0 0 10px rgba(0,240,255,0.25);
+        }
+        #search-suggestions {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 10;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            border-radius: 4px;
+        }
+        .suggestion-item {
+            padding: 8px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+        }
+        .suggestion-item:hover {
+            background-color: var(--border);
+        }
+        .semitransparent {
+            opacity: 0.1 !important;
+        }
+        .toggle-group {
+            display: inline-flex;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+        .toggle-btn {
+            background-color: var(--bg-elev);
+            color: var(--muted);
+            border: none;
+            padding: 5px 12px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            margin: 0;
+            border-radius: 0;
+        }
+        .toggle-btn.active {
+            background-color: var(--accent);
+            color: var(--bg);
+        }
+
+        .highlighted-edge {
+            line-color: var(--cyan) !important;
+            target-arrow-color: var(--cyan) !important;
+            width: 4px !important;
+        }
+
+        .tag {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 10px;
+            text-transform: uppercase;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+
+        .tag-high { background-color: rgba(255,42,109,0.18); color: var(--high); }
+        .tag-med { background-color: rgba(252,238,10,0.16); color: var(--med); }
+        .tag-info { background-color: rgba(0,240,255,0.16); color: var(--info); }
+        .tag-low { background-color: rgba(27,231,181,0.16); color: var(--low); }
+
+        #details-pane {
+            display: none;
+        }
+
+        .back-btn {
+            margin-bottom: 15px;
+            display: inline-block;
+        }
+
+        .graph-controls {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 100;
+        }
+
+        .graph-btn {
+            background-color: var(--panel);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            font-size: 0.8rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .graph-btn:hover {
+            background-color: var(--bg-elev);
+            border-color: var(--accent);
+        }
+
+        .instruction-toast {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background-color: rgba(15, 17, 25, 0.9);
+            border: 1px solid var(--accent);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            color: var(--text);
+            z-index: 100;
+            pointer-events: none;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5), 0 0 12px rgba(252,238,10,0.12);
+        }
+
+        /* Context Menu Styles */
+        #ctx-menu {
+            position: absolute;
+            display: none;
+            background-color: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 5px 0;
+            z-index: 2000;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            min-width: 160px;
+        }
+
+        .ctx-item {
+            padding: 8px 15px;
+            font-size: 0.85rem;
+            color: var(--text);
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .ctx-item:hover {
+            background-color: var(--accent);
+            color: var(--bg);
+        }
+
+        .ctx-divider {
+            height: 1px;
+            background-color: var(--border);
+            margin: 5px 0;
+        }
+
+        .btn-active {
+            border-color: var(--accent) !important;
+            color: var(--accent) !important;
+        }
+
+        /* Full Report Modal Styles */
+        #report-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.85);
+            z-index: 1000;
+            overflow-y: auto;
+            padding: 40px;
+            box-sizing: border-box;
+        }
+
+        .modal-content {
+            background-color: var(--panel);
+            max-width: 1000px;
+            margin: 40px auto;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 40px;
+            position: relative;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+
+        .close-modal {
+            position: fixed;
+            top: 25px;
+            right: 25px;
+            width: 44px;
+            height: 44px;
+            background-color: var(--accent);
+            color: var(--bg);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8rem;
+            cursor: pointer;
+            z-index: 2000;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5), 0 0 16px rgba(252,238,10,0.35);
+            transition: all 0.2s ease;
+            line-height: 1;
+        }
+
+        .close-modal:hover {
+            transform: scale(1.1);
+            background-color: var(--cyan);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5), 0 0 16px rgba(0,240,255,0.4);
+        }
+
+        .modal-footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: center;
+        }
+
+        .report-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .report-stat {
+            background-color: var(--bg);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .report-stat strong {
+            display: block;
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-bottom: 5px;
+        }
+
+        .report-stat span {
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+
+        .view-report-btn {
+            background-color: var(--accent);
+            color: var(--bg);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        .view-report-btn:hover {
+            opacity: 0.9;
+            box-shadow: 0 0 14px rgba(252,238,10,0.35);
+        }
+
+        .seed-group {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+
+        .seed-group h4 {
+            margin: 0 0 8px 0;
+            font-size: 0.85rem;
+            color: var(--accent);
+        }
+
+        .seed-item {
+            font-size: 0.8rem;
+            padding: 4px 8px;
+            background: var(--bg);
+            border-radius: 4px;
+            margin-bottom: 4px;
+            word-break: break-all;
+            border: 1px solid transparent;
+            font-family: var(--mono);
+        }
+
+        .seed-item:hover {
+            border-color: var(--accent);
+        }
+
+        .swappable-value {
+            color: var(--med);
+            font-weight: bold;
+            text-decoration: underline dotted;
+            cursor: pointer;
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+
+        .swappable-value:hover {
+            background-color: rgba(252,238,10,0.18);
+        }
+
+        .value-dropdown {
+            position: absolute;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            z-index: 2000;
+            max-height: 150px;
+            overflow-y: auto;
+            min-width: 150px;
+        }
+
+        .dropdown-item {
+            padding: 8px 12px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+            font-family: var(--mono);
+        }
+
+        .dropdown-item:hover {
+            background: var(--bg-elev);
+            color: var(--accent);
+        }
+
+        /* Sidebar Tabs */
+        .tab-header {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 15px;
+            gap: 5px;
+        }
+
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            padding: 8px 12px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab-btn:hover {
+            color: var(--text);
+        }
+
+        .tab-btn.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Tree View */
+        .tree-container {
+            font-family: var(--mono);
+            font-size: 0.85rem;
+        }
+
+        .tree-node {
+            margin-left: 15px;
+            border-left: 1px solid var(--border);
+        }
+
+        .tree-item {
+            padding: 4px 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .tree-item:hover {
+            background: var(--bg-elev);
+        }
+
+        .tree-item.selected {
+            background: rgba(0,240,255,0.14);
+            color: var(--cyan);
+        }
+
+        .tree-toggle {
+            width: 16px;
+            height: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s;
+        }
+
+        .tree-toggle.collapsed {
+            transform: rotate(-90deg);
+        }
+
+        .tree-icon {
+            font-size: 0.7rem;
+            opacity: 0.7;
+        }
+
+        .tree-label {
+            flex: 1;
+        }
+
+        .tree-type {
+            color: var(--muted);
+            font-size: 0.75rem;
+            margin-left: auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="report-modal" onclick="if(event.target === this) closeReport()">
+        <div class="close-modal" onclick="closeReport()">&times;</div>
+        <div class="modal-content">
+            <h2 style="margin-top:0">Full Security Analysis Report</h2>
+            <div class="meta" id="report-meta-text"></div>
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;">
+            
+            <h3>Schema Statistics</h3>
+            <div class="report-grid" id="report-stats-grid"></div>
+
+            <h3>Vulnerability Details</h3>
+            <div id="report-findings-content"></div>
+
+            <div class="modal-footer">
+                <button class="view-report-btn" style="width: auto; padding: 10px 30px;" onclick="closeReport()">Close Report</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="sidebar">
+        <div class="header">
+            <h1>Introspectre Visual</h1>
+            <div class="meta">Source: {{SOURCE}}</div>
+            <button class="view-report-btn" onclick="openReport()">View Full Report Summary</button>
+        </div>
+
+        <div class="search-container">
+            <input type="text" id="node-search" placeholder="Search types or fields..." autocomplete="off">
+            <div id="search-suggestions"></div>
+        </div>
+
+        <div id="summary-pane">
+            <div class="tab-header">
+                <button class="tab-btn active" onclick="switchTab('findings')">Findings</button>
+                <button class="tab-btn" onclick="switchTab('seeds')">Seeds</button>
+                <button class="tab-btn" onclick="switchTab('schema')">Schema</button>
+            </div>
+
+            <div id="tab-findings" class="tab-content active">
+                <div id="findings-list"></div>
+            </div>
+
+            <div id="tab-seeds" class="tab-content">
+                <div id="seeds-list">
+                    <div style="font-size: 0.8rem; color: var(--muted);">No data discovered from traffic yet.</div>
+                </div>
+            </div>
+
+            <div id="tab-schema" class="tab-content">
+                <div id="schema-tree" class="tree-container"></div>
+            </div>
+        </div>
+
+        <div id="details-pane">
+            <button class="back-btn" onclick="showSummary()">← Back to list</button>
+            <div id="details-content"></div>
+        </div>
+    </div>
+    <div id="cy"></div>
+    <div id="ctx-menu">
+        <div class="ctx-item" onclick="ctxExpandNode()">Expand Relations</div>
+        <div class="ctx-item" onclick="ctxExpandAll()">Expand All Children</div>
+        <div class="ctx-divider"></div>
+        <div class="ctx-item" onclick="ctxTraceRoot()">Trace Path to Root</div>
+        <div class="ctx-item" onclick="ctxHideNode()">Hide Node</div>
+    </div>
+    <div class="graph-controls">
+        <button class="graph-btn" id="filter-scalars-btn" onclick="toggleScalars()">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg>
+            Scalars: SHOWN
+        </button>
+        <button class="graph-btn" id="isolate-mode-btn" onclick="toggleIsolateMode()">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm6 5c0-2.21-3.13-4-7-4s-7 1.79-7 4v1h14v-1z"/></svg>
+            Isolate Mode: OFF
+        </button>
+        <button class="graph-btn" onclick="resetGraph()">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a4.5 4.5 0 104.5 4.5H11l3 3.5 3-3.5h-1.5a6 6 0 11-6-6V3.5z"/></svg>
+            Reset Graph
+        </button>
+        <button class="graph-btn" onclick="showAllNodes()">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zM1.5 8a6.5 6.5 0 1113 0 6.5 6.5 0 01-13 0z"/></svg>
+            Show All
+        </button>
+    </div>
+    <div class="instruction-toast">
+        <b>Tip:</b> Click a node to expand its relations.<br>
+        Scroll to zoom, drag to pan.
+    </div>
+
+    <script>
+        const graphData = {{GRAPH_DATA}};
+        const findingsData = {{FINDINGS_DATA}};
+        const statsData = {{STATS}};
+        const metaData = {{META}};
+        const seedsData = {{SEEDS_DATA}};
+
+        // Master lists for quick lookup
+        const masterNodes = graphData.nodes;
+        const masterEdges = graphData.edges.map(e => ({
+            ...e,
+            id: `${e.source}-${e.target}-${e.label}`
+        }));
+
+        function openReport() {
+            const modal = document.getElementById('report-modal');
+            const statsGrid = document.getElementById('report-stats-grid');
+            const findingsContent = document.getElementById('report-findings-content');
+            const metaText = document.getElementById('report-meta-text');
+
+            // Set meta info
+            metaText.innerHTML = `Source: ${metaData.source} | Mode: ${metaData.offline ? 'Offline' : 'Live'}`;
+
+            // Set stats
+            statsGrid.innerHTML = `
+                <div class="report-stat"><strong>Total Types</strong><span>${statsData.total_types}</span></div>
+                <div class="report-stat"><strong>Queries</strong><span>${statsData.queries}</span></div>
+                <div class="report-stat"><strong>Mutations</strong><span>${statsData.mutations}</span></div>
+                <div class="report-stat"><strong>Total Fields</strong><span>${statsData.total_fields}</span></div>
+            `;
+
+            // Set findings
+            let html = "";
+            findingsData.forEach(f => {
+                html += `
+                    <div class="card severity-${f.severity.toLowerCase()}">
+                        <h3>[${f.severity}] ${f.title} <span class="id">${f.id}</span></h3>
+                        <p>${f.description}</p>
+                        <h4>Affected</h4>
+                        <ul>${f.affected.map(a => `<li>${a}</li>`).join('')}</ul>
+                        <h4>Remediation</h4>
+                        <p style="color: var(--low)">${f.remediation}</p>
+                    </div>
+                `;
+            });
+            findingsContent.innerHTML = html;
+
+            modal.style.display = 'block';
+        }
+
+        function closeReport() {
+            document.getElementById('report-modal').style.display = 'none';
+        }
+
+        const cy = cytoscape({
+            container: document.getElementById('cy'),
+            elements: [], // Initialized in resetGraph()
+            style: [
+                {
+                    selector: 'node',
+                    style: {
+                        'label': 'data(label)',
+                        'color': '#d7e0ea',
+                        'background-color': '#161a26',
+                        'width': 40,
+                        'height': 40,
+                        'font-size': '10px',
+                        'font-family': 'ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace',
+                        'text-valign': 'bottom',
+                        'text-margin-y': '5px',
+                        'cursor': 'pointer',
+                        'border-width': 1,
+                        'border-color': '#3a3f5c'
+                    }
+                },
+                {
+                    selector: 'node[risk = "high"]',
+                    style: {
+                        'background-color': '#FF2A6D',
+                        'width': 55,
+                        'height': 55,
+                        'shadow-blur': 22,
+                        'shadow-color': '#FF2A6D',
+                        'shadow-opacity': 0.6,
+                        'shadow-offset-x': 0,
+                        'shadow-offset-y': 0
+                    }
+                },
+                {
+                    selector: 'node[risk = "medium"]',
+                    style: { 'background-color': '#FCEE0A', 'width': 48, 'height': 48 }
+                },
+                {
+                    selector: 'node[risk = "info"]',
+                    style: { 'background-color': '#00F0FF' }
+                },
+                {
+                    selector: 'node[opType = "mutation"]',
+                    style: { 'background-color': '#B967FF' }
+                },
+                {
+                    selector: 'node[isRoot]',
+                    style: { 'border-width': 2, 'border-color': '#FCEE0A' }
+                },
+                {
+                    selector: 'node[kind = "SCALAR"]',
+                    style: { 'shape': 'hexagon', 'background-color': '#7a8296' }
+                },
+                {
+                    selector: 'edge',
+                    style: {
+                        'width': 2,
+                        'line-color': '#363b52',
+                        'target-arrow-color': '#363b52',
+                        'target-arrow-shape': 'triangle',
+                        'curve-style': 'bezier',
+                        'label': 'data(label)',
+                        'font-size': '9px',
+                        'font-family': 'ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace',
+                        'color': '#d7e0ea',
+                        'text-rotation': 'autorotate',
+                        'text-background-color': '#0a0a0f',
+                        'text-background-opacity': 1,
+                        'text-background-padding': '3px',
+                        'text-background-shape': 'round-rectangle',
+                        'cursor': 'pointer',
+                        'opacity': 0.8,
+                        'overlay-padding': '15px',
+                        'overlay-opacity': 0
+                    }
+                },
+                {
+                    selector: 'edge[isDeprecated]',
+                    style: { 'line-style': 'dashed', 'opacity': 0.5 }
+                },
+                {
+                    selector: '.highlighted-edge',
+                    style: {
+                        'line-color': '#00F0FF',
+                        'target-arrow-color': '#00F0FF',
+                        'width': 4,
+                        'opacity': 1.0
+                    }
+                },
+                {
+                    selector: '.highlighted',
+                    style: {
+                        'border-width': 4,
+                        'border-color': '#FCEE0A',
+                        'shadow-blur': 16,
+                        'shadow-color': '#FCEE0A',
+                        'shadow-opacity': 0.5,
+                        'shadow-offset-x': 0,
+                        'shadow-offset-y': 0
+                    }
+                },
+                {
+                    selector: '.expandable',
+                    style: {
+                        'border-width': 3,
+                        'border-style': 'dashed',
+                        'border-color': '#7a8296'
+                    }
+                }
+            ],
+            layout: {
+                name: 'dagre',
+                rankDir: 'LR',
+                nodeSep: 50,
+                rankSep: 100,
+                edgeSep: 10,
+                padding: 50
+            },
+            userZoomingEnabled: true,
+            userPanningEnabled: true,
+            boxSelectionEnabled: false,
+            selectionType: 'single'
+        });
+
+        function runLayout() {
+            cy.layout({
+                name: 'dagre',
+                rankDir: 'LR',
+                nodeSep: 60,
+                rankSep: 120,
+                animate: true,
+                animationDuration: 500
+            }).run();
+        }
+
+        function resetGraph() {
+            cy.elements().remove();
+            const rootNodes = masterNodes.filter(n => n.isRoot);
+            if (hideScalars) {
+                // If hiding scalars, we only add root nodes (which are usually OBJECTS)
+                cy.add(rootNodes.filter(n => n.kind !== 'SCALAR' && n.kind !== 'ENUM').map(n => ({ data: n })));
+            } else {
+                cy.add(rootNodes.map(n => ({ data: n })));
+            }
+            updateExpandableMarkers();
+            runLayout();
+        }
+
+        function showAllNodes() {
+            if (masterNodes.length > 500 && !confirm(`This schema has ${masterNodes.length} types. Rendering everything may be slow. Continue?`)) return;
+            cy.elements().remove();
+            
+            let nodesToAdd = masterNodes;
+            let edgesToAdd = masterEdges;
+            
+            if (hideScalars) {
+                nodesToAdd = masterNodes.filter(n => n.kind !== 'SCALAR' && n.kind !== 'ENUM');
+                edgesToAdd = masterEdges.filter(e => {
+                    const target = masterNodes.find(n => n.id === e.target);
+                    return target && target.kind !== 'SCALAR' && target.kind !== 'ENUM';
+                });
+            }
+
+            cy.add(nodesToAdd.map(n => ({ data: n })));
+            cy.add(edgesToAdd.map(e => ({ data: e })));
+            runLayout();
+        }
+
+        let hideScalars = true; // Default to true to reduce clutter
+        function toggleScalars() {
+            hideScalars = !hideScalars;
+            const btn = document.getElementById('filter-scalars-btn');
+            btn.innerHTML = hideScalars ? 
+                `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg> Scalars: HIDDEN` : 
+                `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg> Scalars: SHOWN`;
+            btn.classList.toggle('btn-active', hideScalars);
+            
+            if (hideScalars) {
+                const toRemove = cy.nodes().filter(n => n.data('kind') === 'SCALAR' || n.data('kind') === 'ENUM');
+                cy.remove(toRemove);
+            }
+        }
+
+        // Initialize Scalar button state
+        document.getElementById('filter-scalars-btn').classList.add('btn-active');
+        document.getElementById('filter-scalars-btn').innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg> Scalars: HIDDEN`;
+
+        function expandNode(nodeId) {
+            let outgoing = masterEdges.filter(e => e.source === nodeId);
+            
+            if (hideScalars) {
+                outgoing = outgoing.filter(e => {
+                    const target = masterNodes.find(n => n.id === e.target);
+                    return target && target.kind !== 'SCALAR' && target.kind !== 'ENUM';
+                });
+            }
+
+            let addedCount = 0;
+            
+            outgoing.forEach(e => {
+                if (cy.$id(e.target).empty()) {
+                    const node = masterNodes.find(n => n.id === e.target);
+                    if (node) cy.add({ data: node });
+                    addedCount++;
+                }
+                if (cy.$id(e.id).empty()) {
+                    cy.add({ data: e });
+                    addedCount++;
+                }
+            });
+
+            if (addedCount > 0) {
+                updateExpandableMarkers();
+                runLayout();
+            }
+        }
+
+        // Context Menu Logic
+        let selectedNodeId = null;
+        cy.on('cxttap', 'node', function(evt) {
+            const node = evt.target;
+            selectedNodeId = node.id();
+            
+            const menu = document.getElementById('ctx-menu');
+            menu.style.display = 'block';
+            menu.style.left = evt.renderedPosition.x + 'px';
+            menu.style.top = evt.renderedPosition.y + 'px';
+        });
+
+        window.addEventListener('click', function() {
+            document.getElementById('ctx-menu').style.display = 'none';
+        });
+
+        function ctxExpandNode() {
+            if (selectedNodeId) expandNode(selectedNodeId);
+        }
+
+        function ctxExpandAll() {
+            if (!selectedNodeId) return;
+            
+            const expandRecursive = (id, depth) => {
+                if (depth > 3) return;
+                expandNode(id);
+                const children = masterEdges.filter(e => e.source === id).map(e => e.target);
+                children.forEach(c => expandRecursive(c, depth + 1));
+            };
+            
+            expandRecursive(selectedNodeId, 0);
+        }
+
+        function ctxTraceRoot() {
+            if (selectedNodeId) ensurePathVisible(selectedNodeId);
+        }
+
+        function ctxHideNode() {
+            if (selectedNodeId) cy.$id(selectedNodeId).remove();
+        }
+
+        function updateExpandableMarkers() {
+            cy.nodes().forEach(node => {
+                const id = node.id();
+                const hasOutgoingInMaster = masterEdges.some(e => e.source === id);
+                const allOutgoingShown = masterEdges
+                    .filter(e => e.source === id)
+                    .every(e => !cy.$id(e.id).empty());
+                
+                if (hasOutgoingInMaster && !allOutgoingShown) {
+                    node.addClass('expandable');
+                } else {
+                    node.removeClass('expandable');
+                }
+            });
+        }
+
+        let isolateMode = false;
+        function toggleIsolateMode() {
+            isolateMode = !isolateMode;
+            const btn = document.getElementById('isolate-mode-btn');
+            btn.innerHTML = isolateMode ? 
+                `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm6 5c0-2.21-3.13-4-7-4s-7 1.79-7 4v1h14v-1z"/></svg> Isolate Mode: ON` : 
+                `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm6 5c0-2.21-3.13-4-7-4s-7 1.79-7 4v1h14v-1z"/></svg> Isolate Mode: OFF`;
+            btn.style.borderColor = isolateMode ? 'var(--accent)' : 'var(--border)';
+        }
+
+        function getFullPathDiscovery(targetId) {
+            const rootIds = masterNodes.filter(n => n.isRoot).map(n => n.id);
+            
+            // 1. Find the shortest path from any root to the target
+            let shortestPath = null;
+            let queue = rootIds.map(id => [id]);
+            let visited = new Set(rootIds);
+
+            while (queue.length > 0) {
+                let path = queue.shift();
+                let last = path[path.length - 1];
+
+                if (last === targetId) {
+                    shortestPath = path;
+                    break;
+                }
+
+                masterEdges.filter(e => e.source === last).forEach(e => {
+                    if (!visited.has(e.target)) {
+                        visited.add(e.target);
+                        queue.push([...path, e.target]);
+                    }
+                });
+            }
+
+            // 2. Find ALL downstream successors recursively
+            let successors = new Set();
+            let succEdges = new Set();
+            const stack = [targetId];
+            const seen = new Set();
+
+            while (stack.length > 0) {
+                const current = stack.pop();
+                if (seen.has(current)) continue;
+                seen.add(current);
+                successors.add(current);
+
+                let outgoing = masterEdges.filter(e => e.source === current);
+                if (hideScalars) {
+                    outgoing = outgoing.filter(e => {
+                        const tNode = masterNodes.find(n => n.id === e.target);
+                        return tNode && tNode.kind !== 'SCALAR' && tNode.kind !== 'ENUM';
+                    });
+                }
+
+                outgoing.forEach(e => {
+                    succEdges.add(e.id);
+                    stack.push(e.target);
+                });
+            }
+
+            // 3. Collect final set of nodes and edges
+            const nodesSet = new Set(shortestPath || [targetId]);
+            successors.forEach(s => nodesSet.add(s));
+
+            const edgesSet = new Set(succEdges);
+            if (shortestPath) {
+                for (let i = 0; i < shortestPath.length - 1; i++) {
+                    // Collect ALL edges between these two nodes to show full context
+                    masterEdges.filter(e => e.source === shortestPath[i] && e.target === shortestPath[i+1])
+                        .forEach(e => edgesSet.add(e.id));
+                }
+            }
+
+            return {
+                nodes: Array.from(nodesSet).map(id => masterNodes.find(n => n.id === id)).filter(Boolean),
+                edges: Array.from(edgesSet).map(id => masterEdges.find(e => e.id === id)).filter(Boolean)
+            };
+        }
+
+        function performIsolation(targetNodeId) {
+            const discovery = getFullPathDiscovery(targetNodeId);
+            cy.elements().remove();
+            
+            cy.add(discovery.nodes.map(n => ({ data: n })));
+            cy.add(discovery.edges.map(e => ({ data: e })));
+            
+            updateExpandableMarkers();
+            runLayout();
+        }
+
+        function ensurePathVisible(targetNodeId) {
+            if (isolateMode) {
+                performIsolation(targetNodeId);
+                return;
+            }
+
+            // Find path from any root in master data
+            const rootIds = masterNodes.filter(n => n.isRoot).map(n => n.id);
+            if (rootIds.includes(targetNodeId)) {
+                if (cy.$id(targetNodeId).empty()) {
+                    const node = masterNodes.find(n => n.id === targetNodeId);
+                    cy.add({ data: node });
+                    runLayout();
+                }
+                return;
+            }
+
+            // Simple BFS to find path in master data
+            const queue = rootIds.map(r => [r]);
+            const visited = new Set(rootIds);
+            let path = null;
+
+            while (queue.length > 0) {
+                const currentPath = queue.shift();
+                const lastNode = currentPath[currentPath.length - 1];
+
+                if (lastNode === targetNodeId) {
+                    path = currentPath;
+                    break;
+                }
+
+                masterEdges
+                    .filter(e => e.source === lastNode)
+                    .forEach(e => {
+                        if (!visited.has(e.target)) {
+                            visited.add(e.target);
+                            queue.push([...currentPath, e.target]);
+                        }
+                    });
+            }
+
+            if (path) {
+                path.forEach((nodeId, i) => {
+                    if (cy.$id(nodeId).empty()) {
+                        const node = masterNodes.find(n => n.id === nodeId);
+                        if (node) cy.add({ data: node });
+                    }
+                    if (i > 0) {
+                        const prevNodeId = path[i-1];
+                        const edge = masterEdges.find(e => e.source === prevNodeId && e.target === nodeId);
+                        if (edge && cy.$id(edge.id).empty()) {
+                            cy.add({ data: edge });
+                        }
+                    }
+                });
+                updateExpandableMarkers();
+                runLayout();
+            } else {
+                // Root node case or unreachable
+                if (cy.$id(targetNodeId).empty()) {
+                    const node = masterNodes.find(n => n.id === targetNodeId);
+                    if (node) {
+                        cy.add({ data: node });
+                        runLayout();
+                    }
+                }
+            }
+        }
+
+        function showSummary() {
+            document.getElementById('summary-pane').style.display = 'block';
+            document.getElementById('details-pane').style.display = 'none';
+            cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+        }
+
+        function processQueryForSeeds(query) {
+            let result = query;
+            seedsData.forEach(s => {
+                const escapedVal = s.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const fieldName = s.field_name;
+                const regex = new RegExp(`(${fieldName}:\\s+)("?${escapedVal}"?)(\\s+#\\s+\\[Source: [^\\]]+\\])`, 'g');
+                result = result.replace(regex, (match, p1, p2, p3) => {
+                    return `${p1}<span class="swappable-value" data-field="${fieldName}" onclick="openValueDropdown(this, event)">${p2}</span>${p3}`;
+                });
+            });
+            return result;
+        }
+
+        function showDetails(findingId) {
+            const finding = findingsData.find(f => f.id === findingId);
+            if (!finding) return;
+
+            document.getElementById('summary-pane').style.display = 'none';
+            document.getElementById('details-pane').style.display = 'block';
+
+            let html = `
+                <div class="card severity-${finding.severity.toLowerCase()}">
+                    <button class="back-btn" onclick="showSummary()">← Back to list</button>
+                    <h3>[${finding.id}] ${finding.title}</h3>
+                    <p>${finding.description}</p>
+                    <strong>Remediation:</strong>
+                    <p style="color: var(--low)">${finding.remediation}</p>
+                </div>
+                <h4>Affected Fields & Exploits</h4>
+            `;
+
+            finding.affected.forEach((aff, index) => {
+                const tplObj = finding.templates[index];
+                let literalStr = typeof tplObj === 'object' && tplObj.literal ? tplObj.literal : String(tplObj);
+                const varStr = typeof tplObj === 'object' && tplObj.variable ? tplObj.variable : literalStr;
+
+                literalStr = processQueryForSeeds(literalStr);
+
+                html += `
+                    <div class="card">
+                        <strong>${aff}</strong>
+                        <div class="toggle-group" id="finding-toggle-${index}">
+                            <button class="toggle-btn active" onclick="toggleFindingQuery(${index}, 'literal')">Literal</button>
+                            <button class="toggle-btn" onclick="toggleFindingQuery(${index}, 'variable')">Variables</button>
+                        </div>
+                        <pre id="tpl-lit-${index}">${literalStr}</pre>
+                        <pre id="tpl-var-${index}" style="display:none;">${varStr}</pre>
+                        
+                        <div id="btn-group-lit-${index}" style="margin-top: 10px;">
+                            <button onclick="copyToClipboard('tpl-lit-${index}')">Copy GraphQL</button>
+                            <button onclick="copyAsCurlGeneric('tpl-lit-${index}')">Copy as cURL</button>
+                            <button onclick="copyAsPythonGeneric('tpl-lit-${index}')">Copy as Python</button>
+                        </div>
+                        <div id="btn-group-var-${index}" style="display:none; margin-top: 10px;">
+                            <button onclick="copyToClipboard('tpl-var-${index}')">Copy GraphQL</button>
+                            <button onclick="copyAsCurlGeneric('tpl-var-${index}')">Copy as cURL</button>
+                            <button onclick="copyAsPythonGeneric('tpl-var-${index}')">Copy as Python</button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            document.getElementById('details-content').innerHTML = html;
+
+            // Highlight path in graph
+            cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+            finding.affected.forEach(aff => {
+                const typeName = aff.split('.')[0];
+                ensurePathVisible(typeName);
+                cy.$(`node[id = "${typeName}"]`).addClass('highlighted');
+            });
+        }
+
+        function getQueryForEdge(edgeData) {
+            const sourceId = edgeData.source;
+            const targetId = edgeData.target;
+            const fieldName = edgeData.label;
+
+            // Find shortest weighted path from any root node using MASTER data
+            const rootIds = masterNodes.filter(n => n.isRoot).map(n => n.id);
+            let bestPath = null;
+            let bestRootId = null;
+            let minWeight = Infinity;
+
+            // BFS for shortest path in master data
+            rootIds.forEach(rootId => {
+                const queue = [[rootId]];
+                const visited = new Set([rootId]);
+                
+                while (queue.length > 0) {
+                    const path = queue.shift();
+                    const lastId = path[path.length - 1];
+
+                    if (lastId === sourceId) {
+                        const weight = path.length; 
+                        if (weight < minWeight) {
+                            minWeight = weight;
+                            bestPath = path;
+                            bestRootId = rootId;
+                        }
+                        break;
+                    }
+
+                    masterEdges.filter(e => e.source === lastId).forEach(e => {
+                        if (!visited.has(e.target)) {
+                            visited.add(e.target);
+                            queue.push([...path, e.target]);
+                        }
+                    });
+                }
+            });
+
+            let queryPath = []; 
+            if (bestPath) {
+                for (let i = 0; i < bestPath.length - 1; i++) {
+                    const s = bestPath[i];
+                    const t = bestPath[i+1];
+                    const edge = masterEdges.find(e => e.source === s && e.target === t);
+                    if (edge) {
+                        queryPath.push({ label: edge.label, args: edge.args || [] });
+                    }
+                }
+            }
+            queryPath.push({ label: fieldName, args: edgeData.args || [] });
+
+            // Construct Query
+            let indent = "  ";
+            let literalQuery = "";
+            let varQueryBody = "";
+            let varDefs = [];
+            
+            const bestRootNode = masterNodes.find(n => n.id === bestRootId);
+            let rootOp = "query";
+            let opBadgeClass = "tag-info";
+            if (bestRootNode && bestRootNode.opType) {
+                rootOp = bestRootNode.opType;
+                if (rootOp === 'mutation') opBadgeClass = "tag-high";
+                if (rootOp === 'subscription') opBadgeClass = "tag-med";
+            }
+
+            literalQuery += `${rootOp} {\n`;
+            queryPath.forEach((seg, i) => {
+                literalQuery += `${indent}${seg.label}`;
+                varQueryBody += `${indent}${seg.label}`;
+                
+                if (seg.args && seg.args.length > 0) {
+                    const litArgs = [];
+                    const varArgs = [];
+                    seg.args.forEach(a => {
+                        const fieldSeeds = seedsData.filter(s => s.field_name === a.name);
+                        let val = a.sampleValue;
+                        let displayVal = val;
+                        let annotation = "";
+                        
+                        if (fieldSeeds.length > 0) {
+                            val = fieldSeeds[0].value;
+                            if (a.typeName === 'String' || a.typeName === 'ID') {
+                                val = `"${val}"`;
+                            }
+                            annotation = ` # [Source: ${fieldSeeds[0].source}]`;
+                            displayVal = `<span class="swappable-value" data-field="${a.name}" onclick="openValueDropdown(this, event)">${val}</span>`;
+                        }
+                        
+                        litArgs.push(`${a.name}: ${displayVal}${annotation}`);
+                        varArgs.push(`${a.name}: $${a.name}`);
+                        varDefs.push(`$${a.name}: ${a.typeName || 'String'}`);
+                    });
+                    literalQuery += `(${litArgs.join(", ")})`;
+                    varQueryBody += `(${varArgs.join(", ")})`;
+                }
+
+                if (i < queryPath.length - 1) {
+                    literalQuery += " {\n";
+                    varQueryBody += " {\n";
+                    indent += "  ";
+                }
+            });
+            
+            const targetNode = masterNodes.find(n => n.id === targetId);
+            const targetKind = targetNode ? targetNode.kind : 'UNKNOWN';
+            if (targetKind === 'OBJECT' || targetKind === 'INTERFACE' || targetKind === 'UNION') {
+                const typeSelect = " {\n" + `${indent}  __typename\n` + `${indent}}`;
+                literalQuery += typeSelect;
+                varQueryBody += typeSelect;
+            }
+
+            for (let i = 0; i < queryPath.length - 1; i++) {
+                indent = indent.substring(0, indent.length - 2);
+                literalQuery += `\n${indent}}`;
+                varQueryBody += `\n${indent}}`;
+            }
+            literalQuery += "\n}";
+            
+            let varQuery = "";
+            if (varDefs.length > 0) {
+                const uniqueDefs = [...new Set(varDefs)];
+                varQuery = `${rootOp} Explore(${uniqueDefs.join(", ")}) {\n${varQueryBody}\n}`;
+            } else {
+                varQuery = `${rootOp} Explore {\n${varQueryBody}\n}`;
+            }
+
+            return {
+                literalQuery,
+                varQuery,
+                rootOp,
+                opBadgeClass,
+                queryPathStr: bestRootId ? `${bestRootId} → ${queryPath.map(p => p.label).join(' → ')}` : 'None',
+                sourceId: sourceId,
+                targetId: targetId,
+                targetKind: targetKind,
+                fieldName: fieldName
+            };
+        }
+
+        function renderQueryCard(q, index) {
+            const litId = `path-query-literal-${index}`;
+            const varId = `path-query-variable-${index}`;
+            
+            return `
+                <div class="card" style="margin-top: 15px;">
+                    <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
+                        <span class="tag ${q.opBadgeClass}" style="font-size: 0.7rem; padding: 2px 6px; border-radius: 4px;">${q.rootOp.toUpperCase()}</span>
+                        <strong style="font-size: 0.9rem;">${q.sourceId}.${q.fieldName}</strong>
+                    </div>
+                    <div class="meta" style="margin-bottom: 10px; font-size: 0.75rem;">
+                        <strong>Path:</strong> ${q.queryPathStr}
+                    </div>
+                    <div class="toggle-group" style="margin-bottom: 10px;">
+                        <button class="toggle-btn active" onclick="toggleQuerySet('${litId}', '${varId}', this)">Literal</button>
+                        <button class="toggle-btn" onclick="toggleQuerySet('${varId}', '${litId}', this)">Variables</button>
+                    </div>
+                    <pre id="${litId}">${q.literalQuery}</pre>
+                    <pre id="${varId}" style="display:none;">${q.varQuery}</pre>
+                    
+                    <div style="margin-top: 10px; display: flex; gap: 8px;">
+                        <button class="btn-sm" onclick="copyToClipboard('${litId}')">Copy GraphQL</button>
+                        <button class="btn-sm" onclick="copyAsCurlGeneric('${litId}')">cURL</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        window.toggleQuerySet = function(showId, hideId, btn) {
+            document.getElementById(showId).style.display = 'block';
+            document.getElementById(hideId).style.display = 'none';
+            btn.parentElement.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        };
+
+        function showPathDetails(edge) {
+            try {
+                const q = getQueryForEdge(edge.data());
+                
+                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+                edge.addClass('highlighted-edge');
+                edge.source().addClass('highlighted');
+                edge.target().addClass('highlighted');
+
+                document.getElementById('summary-pane').style.display = 'none';
+                document.getElementById('details-pane').style.display = 'block';
+
+                let html = `
+                    <div class="card">
+                        <button class="back-btn" onclick="showSummary()">← Back to list</button>
+                        <h3>Traversal Details</h3>
+                        <p>Field: <strong>${q.fieldName}</strong> on <strong>${q.sourceId}</strong></p>
+                        <p>Returns: <strong>${q.targetId}</strong> (${q.targetKind})</p>
+                    </div>
+                    ${renderQueryCard(q, 0)}
+                `;
+
+                const fieldId = `${q.sourceId}.${q.fieldName}`;
+                const relevantFindings = findingsData.filter(f => f.affected.some(aff => aff.startsWith(fieldId) || aff === fieldId));
+                
+                if (relevantFindings.length > 0) {
+                    html += `<h4 style="margin-top: 20px;">Related Security Findings</h4>`;
+                    relevantFindings.forEach(f => {
+                        html += `
+                            <div class="finding-item" onclick="showDetails('${f.id}')">
+                                <span class="tag tag-${f.severity.toLowerCase()}">${f.severity}</span>
+                                <strong>${f.title}</strong>
+                            </div>
+                        `;
+                    });
+                }
+
+                document.getElementById('details-content').innerHTML = html;
+            } catch (err) {
+                console.error("Error in showPathDetails:", err);
+            }
+        }
+
+        function copyToClipboard(id) {
+            const text = document.getElementById(id).innerText;
+            navigator.clipboard.writeText(text);
+        }
+
+        function copyAsCurlGeneric(id) {
+            const queryText = document.getElementById(id).innerText;
+            const query = queryText.replace(/\n/g, ' ').replace(/"/g, '\\"');
+            const curl = `curl -X POST -H "Content-Type: application/json" -d '{"query": "${query}"}' {{SOURCE}}`;
+            navigator.clipboard.writeText(curl);
+            alert('Copied as cURL!');
+        }
+
+        function copyAsPythonGeneric(id) {
+            const queryText = document.getElementById(id).innerText;
+            const python = `import requests\n\nurl = "{{SOURCE}}"\nquery = """${queryText}"""\n\nresponse = requests.post(url, json={"query": query})\nprint(response.json())`;
+            navigator.clipboard.writeText(python);
+            alert('Copied as Python snippet!');
+        }
+
+        // Search functionality
+        const searchInput = document.getElementById('node-search');
+        const searchSuggestions = document.getElementById('search-suggestions');
+        
+        searchInput.addEventListener('input', function(e) {
+            const val = e.target.value.toLowerCase();
+            if (!val) {
+                searchSuggestions.style.display = 'none';
+                return;
+            }
+            
+            let suggestions = [];
+            masterNodes.forEach(n => {
+                if (n.id.toLowerCase().includes(val)) {
+                    suggestions.push({ type: 'node', id: n.id, label: n.id });
+                }
+            });
+            masterEdges.forEach(e => {
+                const label = `${e.source}.${e.label}`;
+                if (label.toLowerCase().includes(val)) {
+                    suggestions.push({ type: 'edge', id: e.id, label: label, source: e.source, target: e.target });
+                }
+            });
+            
+            if (suggestions.length > 0) {
+                searchSuggestions.innerHTML = suggestions.slice(0, 10).map(s => `
+                    <div class="suggestion-item" onclick="selectSearchResult('${s.type}', '${s.id}')">
+                        ${s.label}
+                    </div>
+                `).join('');
+                searchSuggestions.style.display = 'block';
+            } else {
+                searchSuggestions.style.display = 'none';
+            }
+        });
+
+        window.selectSearchResult = function(type, id) {
+            searchSuggestions.style.display = 'none';
+            searchInput.value = '';
+            
+            if (type === 'node') {
+                ensurePathVisible(id);
+                const node = cy.$id(id);
+                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+                node.addClass('highlighted');
+                cy.center(node);
+                cy.zoom({level: 1.5, position: node.position()});
+                node.trigger('tap');
+            } else if (type === 'edge') {
+                const edgeData = masterEdges.find(e => e.id === id);
+                if (edgeData) {
+                    ensurePathVisible(edgeData.target);
+                    const edge = cy.$id(id);
+                    cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+                    edge.addClass('highlighted-edge');
+                    cy.center(edge);
+                    cy.zoom({level: 1.5, position: edge.midpoint()});
+                    edge.trigger('tap');
+                }
+            }
+        };
+
+        window.toggleFindingQuery = function(index, type) {
+            const btns = document.querySelectorAll('#finding-toggle-' + index + ' .toggle-btn');
+            btns.forEach(b => b.classList.remove('active'));
+            if (type === 'literal') {
+                btns[0].classList.add('active');
+                document.getElementById('tpl-lit-' + index).style.display = 'block';
+                document.getElementById('tpl-var-' + index).style.display = 'none';
+                document.getElementById('btn-group-lit-' + index).style.display = 'block';
+                document.getElementById('btn-group-var-' + index).style.display = 'none';
+            } else {
+                btns[1].classList.add('active');
+                document.getElementById('tpl-lit-' + index).style.display = 'none';
+                document.getElementById('tpl-var-' + index).style.display = 'block';
+                document.getElementById('btn-group-lit-' + index).style.display = 'none';
+                document.getElementById('btn-group-var-' + index).style.display = 'block';
+            }
+        };
+
+        window.toggleQuery = function(type) {
+            const btns = document.querySelectorAll('#query-toggle .toggle-btn');
+            btns.forEach(b => b.classList.remove('active'));
+            if (type === 'literal') {
+                btns[0].classList.add('active');
+                document.getElementById('path-query-literal').style.display = 'block';
+                document.getElementById('path-query-variable').style.display = 'none';
+                document.getElementById('btn-group-literal').style.display = 'block';
+                document.getElementById('btn-group-variable').style.display = 'none';
+            } else {
+                btns[1].classList.add('active');
+                document.getElementById('path-query-literal').style.display = 'none';
+                document.getElementById('path-query-variable').style.display = 'block';
+                document.getElementById('btn-group-literal').style.display = 'none';
+                document.getElementById('btn-group-variable').style.display = 'block';
+            }
+        };
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            
+            document.querySelector(`.tab-btn[onclick="switchTab('${tabId}')"]`).classList.add('active');
+            document.getElementById(`tab-${tabId}`).classList.add('active');
+
+            if (tabId === 'schema' && !document.getElementById('schema-tree').innerHTML) {
+                buildSchemaTree();
+            }
+        }
+
+        function buildSchemaTree() {
+            const container = document.getElementById('schema-tree');
+            const roots = masterNodes.filter(n => n.isRoot);
+            
+            roots.forEach(root => {
+                // Auto-expand root nodes by default
+                container.appendChild(createTreeNode(root.id, 'OBJECT', true));
+            });
+        }
+
+        function createTreeNode(nodeId, kind, isExpanded = false) {
+            const nodeEl = document.createElement('div');
+            nodeEl.className = 'tree-node-wrapper';
+            
+            const item = document.createElement('div');
+            item.className = 'tree-item';
+            item.setAttribute('data-id', nodeId);
+            
+            const children = masterEdges.filter(e => e.source === nodeId);
+            const hasChildren = children.length > 0;
+            
+            let icon = '📦';
+            if (nodeId === 'Query') icon = '🔍';
+            if (nodeId === 'Mutation') icon = '⚡';
+            if (nodeId === 'Subscription') icon = '📡';
+            if (kind === 'SCALAR') icon = '📝';
+            if (kind === 'ENUM') icon = '🔢';
+
+            item.innerHTML = `
+                <div class="tree-toggle ${hasChildren ? '' : 'hidden'} ${isExpanded ? '' : 'collapsed'}">
+                    ${hasChildren ? '▼' : ''}
+                </div>
+                <span class="tree-icon">${icon}</span>
+                <span class="tree-label">${nodeId}</span>
+            `;
+
+            const toggle = item.querySelector('.tree-toggle');
+            const childrenContainer = document.createElement('div');
+            childrenContainer.className = 'tree-node';
+            
+            // Fix double-click bug: Ensure display state matches the toggle class
+            childrenContainer.style.display = isExpanded ? 'block' : 'none';
+
+            const populateChildren = () => {
+                if (childrenContainer.innerHTML) return; // Already populated
+                
+                children.forEach(edge => {
+                    const targetNode = masterNodes.find(n => n.id === edge.target);
+                    const targetKind = targetNode ? targetNode.kind : 'UNKNOWN';
+                    
+                    // Recursively create children
+                    const childNodeWrapper = createTreeNode(edge.target, targetKind, false);
+                    
+                    // Customize the child item to show the field label
+                    const childItem = childNodeWrapper.querySelector('.tree-item');
+                    const isScalar = targetKind === 'SCALAR' || targetKind === 'ENUM';
+                    const childIcon = isScalar ? '📝' : '🔗';
+                    
+                    childItem.querySelector('.tree-icon').innerText = childIcon;
+                    const labelSpan = childItem.querySelector('.tree-label');
+                    labelSpan.innerHTML = `${edge.label} <span class="tree-type" style="margin-left:8px; opacity:0.5; font-size:0.75rem;">${edge.target}</span>`;
+                    
+                    // Override child click for edge traversal
+                    childItem.onclick = (ev) => {
+                        ev.stopPropagation();
+                        ensurePathVisible(edge.target);
+                        const cyEdge = cy.$id(edge.id);
+                        if (!cyEdge.empty()) {
+                            cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+                            cyEdge.addClass('highlighted-edge');
+                            cy.center(cyEdge);
+                            cyEdge.trigger('tap');
+                        } else {
+                            const tNode = cy.$id(edge.target);
+                            tNode.trigger('tap');
+                        }
+                        document.querySelectorAll('.tree-item').forEach(i => i.classList.remove('selected'));
+                        childItem.classList.add('selected');
+                    };
+                    
+                    childrenContainer.appendChild(childNodeWrapper);
+                });
+            };
+
+            if (isExpanded) populateChildren();
+
+            item.onclick = (e) => {
+                e.stopPropagation();
+                ensurePathVisible(nodeId);
+                const node = cy.$id(nodeId);
+                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+                node.addClass('highlighted');
+                cy.center(node);
+                cy.zoom({level: 1.2, position: node.position()});
+                node.trigger('tap');
+                document.querySelectorAll('.tree-item').forEach(i => i.classList.remove('selected'));
+                item.classList.add('selected');
+            };
+
+            if (hasChildren) {
+                toggle.onclick = (e) => {
+                    e.stopPropagation();
+                    const nowCollapsed = toggle.classList.toggle('collapsed');
+                    childrenContainer.style.display = nowCollapsed ? 'none' : 'block';
+                    if (!nowCollapsed) populateChildren();
+                };
+            }
+
+            nodeEl.appendChild(item);
+            nodeEl.appendChild(childrenContainer);
+            return nodeEl;
+        }
+
+        function renderFindingsList() {
+            const findingsList = document.getElementById('findings-list');
+            findingsList.innerHTML = '';
+            findingsData.forEach(f => {
+                const item = document.createElement('div');
+                item.className = 'finding-item';
+                item.innerHTML = `
+                    <span class="tag tag-${f.severity.toLowerCase()}">${f.severity}</span>
+                    <strong>${f.title}</strong>
+                    <div style="font-size: 0.8rem; color: var(--muted); margin-top: 3px;">${f.id} - ${f.affected.length} affected</div>
+                `;
+                item.onclick = () => showDetails(f.id);
+                findingsList.appendChild(item);
+            });
+        }
+
+        // Initialize tabs
+        switchTab('findings');
+        renderFindingsList();
+
+        cy.on('tap', function(evt){
+            if(evt.target === cy){
+                showSummary();
+            }
+        });
+
+        function showNodeQueries(node) {
+            const typeName = node.id();
+            const kind = node.data('kind');
+            
+            // Search through MASTER edges but FILTER by those that are ACTUALLY RENDERED in the graph
+            // This ensures we only show "what the user sees connected to it"
+            const incomingEdges = masterEdges.filter(e => {
+                return e.target === typeName && !cy.$id(e.id).empty();
+            });
+
+            document.getElementById('summary-pane').style.display = 'none';
+            document.getElementById('details-pane').style.display = 'block';
+
+            let html = `
+                <div class="card">
+                    <button class="back-btn" onclick="showSummary()">← Back to list</button>
+                    <h3>Type Details: ${typeName}</h3>
+                    <div style="display: flex; gap: 8px; margin-top: 10px;">
+                        <span class="tag tag-info">${kind}</span>
+                        <span class="tag tag-low">${incomingEdges.length} Visible Connections</span>
+                    </div>
+                </div>
+            `;
+
+            if (incomingEdges.length > 0) {
+                html += `<h4 style="margin-top: 20px;">Reproduction Queries (Visible Context)</h4>`;
+                incomingEdges.forEach((edgeData, i) => {
+                    try {
+                        const q = getQueryForEdge(edgeData);
+                        html += renderQueryCard(q, i);
+                    } catch (e) {
+                        console.error("Failed to generate query for edge:", e);
+                    }
+                });
+            } else {
+                html += `<p style="color: var(--muted); margin-top: 20px; font-style: italic;">No active discovery paths lead to this node in the current view.</p>`;
+            }
+
+            const relevantFindings = findingsData.filter(f => f.affected.some(aff => aff.startsWith(typeName)));
+            if (relevantFindings.length > 0) {
+                html += `<h4 style="margin-top: 20px;">Related Security Findings</h4>`;
+                relevantFindings.forEach(f => {
+                    html += `
+                        <div class="finding-item" onclick="showDetails('${f.id}')">
+                            <span class="tag tag-${f.severity.toLowerCase()}">${f.severity}</span>
+                            <strong>${f.title}</strong>
+                        </div>
+                    `;
+                });
+            }
+
+            document.getElementById('details-content').innerHTML = html;
+        }
+
+        let nodeTapStartPos = null;
+        let nodeTapStartTime = null;
+        let dragLockTimer = null;
+
+        cy.on('grab', 'node', function(evt) {
+            const node = evt.target;
+            nodeTapStartPos = Object.assign({}, node.position());
+            nodeTapStartTime = Date.now();
+            
+            // Lock node initially to prevent 'dragging a bit' during a click
+            node.lock();
+
+            // Unlock after 200ms of holding, even if no movement occurred
+            dragLockTimer = setTimeout(() => {
+                node.unlock();
+            }, 200);
+        });
+
+        cy.on('drag', 'node', function(evt) {
+            const node = evt.target;
+            if (!nodeTapStartPos) return;
+
+            const currentPos = node.position();
+            const dx = currentPos.x - nodeTapStartPos.x;
+            const dy = currentPos.y - nodeTapStartPos.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            // If the user has moved more than 10 pixels, they probably intend to drag
+            if (distance > 10) {
+                node.unlock();
+                if (dragLockTimer) {
+                    clearTimeout(dragLockTimer);
+                    dragLockTimer = null;
+                }
+            }
+        });
+
+        cy.on('free', 'node', function(evt) {
+            const node = evt.target;
+            const timeElapsed = Date.now() - (nodeTapStartTime || Date.now());
+            
+            // Always ensure node is unlocked when released
+            node.unlock();
+            if (dragLockTimer) {
+                clearTimeout(dragLockTimer);
+                dragLockTimer = null;
+            }
+
+            // Click detection: Short time AND short distance
+            const endPos = node.position();
+            const dx = endPos.x - (nodeTapStartPos ? nodeTapStartPos.x : endPos.x);
+            const dy = endPos.y - (nodeTapStartPos ? nodeTapStartPos.y : endPos.y);
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (timeElapsed < 250 && distance < 10) {
+                const typeName = node.id();
+                const kind = node.data('kind');
+                const isRoot = node.data('isRoot');
+
+                if (isolateMode) {
+                    performIsolation(typeName);
+                } else {
+                    expandNode(typeName);
+                }
+
+                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+                const targetNode = cy.$id(typeName);
+                targetNode.addClass('highlighted');
+                targetNode.connectedEdges().addClass('highlighted-edge');
+
+                // --- Graph-to-Tree Interaction ---
+                const treeItem = document.querySelector(`.tree-item[data-id="${typeName}"]`);
+                if (treeItem) {
+                    switchTab('schema');
+                    document.querySelectorAll('.tree-item').forEach(i => i.classList.remove('selected'));
+                    treeItem.classList.add('selected');
+                    treeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+
+                if (kind === 'SCALAR' || kind === 'ENUM') {
+                    showNodeQueries(targetNode);
+                } else {
+                    const relevantFindings = findingsData.filter(f => f.affected.some(aff => aff.startsWith(typeName)));
+                    if (relevantFindings.length > 0) {
+                        showDetails(relevantFindings[0].id);
+                    }
+                }
+            }
+            
+            nodeTapStartPos = null;
+            nodeTapStartTime = null;
+        });
+
+        cy.on('tap', 'edge', function(evt){
+            showPathDetails(evt.target);
+        });
+
+        // --- Seed Value Swapping Logic ---
+        window.openValueDropdown = function(element, event) {
+            event.stopPropagation();
+            const field = element.getAttribute('data-field');
+            const fieldSeeds = seedsData.filter(s => s.field_name === field);
+            if (fieldSeeds.length <= 1) return;
+
+            // Remove existing dropdowns
+            document.querySelectorAll('.value-dropdown').forEach(d => d.remove());
+
+            const dropdown = document.createElement('div');
+            dropdown.className = 'value-dropdown';
+            fieldSeeds.forEach(s => {
+                const item = document.createElement('div');
+                item.className = 'dropdown-item';
+                let val = s.value;
+                // Simple heuristic for quote wrapping
+                if (element.innerText.startsWith('"')) val = `"${val}"`;
+                item.innerText = val;
+                item.onclick = () => {
+                    element.innerText = val;
+                    dropdown.remove();
+                };
+                dropdown.appendChild(item);
+            });
+
+            document.body.appendChild(dropdown);
+            const rect = element.getBoundingClientRect();
+            dropdown.style.top = `${rect.bottom + window.scrollY}px`;
+            dropdown.style.left = `${rect.left + window.scrollX}px`;
+
+            // Close on click outside
+            const closer = () => {
+                dropdown.remove();
+                document.removeEventListener('click', closer);
+            };
+            setTimeout(() => document.addEventListener('click', closer), 10);
+        };
+
+        // Populate seeds list
+        const seedsList = document.getElementById('seeds-list');
+        if (seedsData.length > 0) {
+            seedsList.innerHTML = '';
+            const groups = {};
+            seedsData.forEach(s => {
+                if (!groups[s.field_name]) groups[s.field_name] = [];
+                groups[s.field_name].push(s);
+            });
+            
+            Object.entries(groups).forEach(([field, seeds]) => {
+                const group = document.createElement('div');
+                group.className = 'seed-group';
+                group.innerHTML = `<h4>${field}</h4>`;
+                seeds.forEach(s => {
+                    const item = document.createElement('div');
+                    item.className = 'seed-item';
+                    item.innerText = s.value;
+                    item.title = `Source: ${s.source}`;
+                    group.appendChild(item);
+                });
+                seedsList.appendChild(group);
+            });
+        }
+
+        // Initialize
+        resetGraph();
+
+    </script>
+</body>
+</html>

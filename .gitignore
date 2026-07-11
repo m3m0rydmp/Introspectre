@@ -1,0 +1,46 @@
+# Rust build artifacts
+/target/
+
+# Editor/OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+secrets.*
+config.local.toml
+
+# Logs/reports
+*.log
+*.tmp
+
+# Backups
+*.bak
+*.orig
+
+# Development documentation (internal use)
+COMMANDS.md
+instructions.md
+instructions2.md
+CODE_REVIEW.md
+ITERATION.md
+
+# Test files
+test.json
+
+# Runtime artifacts (SQLite project DB + generated HTML reports)
+*.db
+introspectre.db
+*-visual.html
+tetest.html
+
+# Sensitive research data
+h1_graphql_data.json
+h1_wordlist.txt

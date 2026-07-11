@@ -1,0 +1,182 @@
+use crate::audit::utils::{
+    build_operation_query, effective_headers, field_non_null_data, find_root_field,
+};
+use crate::config::AppConfig;
+use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
+use reqwest::Client;
+use std::collections::HashMap;
+
+pub async fn probe_idor(
+    schema: &GqlSchema,
+    url: &str,
+    client: &Client,
+    extra_headers: &[String],
+    rate_limit_ms: u64,
+    evasion_level: u8,
+    config: &AppConfig,
+    passive_findings: &[Finding],
+    _confirmed: &mut Vec<Finding>,
+    unconfirmed: &mut Vec<Finding>,
+    idor_payloads: &[String],
+) -> Result<(), String> {
+    let idor_finding = passive_findings.iter().find(|f| f.id == "idor-surface");
+    let Some(idor) = idor_finding else {
+        return Ok(());
+    };
+
+    if config.session.auth_header.trim().is_empty() || config.session.owned_ids.is_empty() {
+        unconfirmed.push(Finding {
+            id: "idor",
+            severity: Severity::Medium,
+            title: "IDOR Probe Skipped (Missing Session Config)",
+            description: "IDOR probing requires session.auth_header and at least one session.owned_ids value in config.".to_string(),
+            affected: vec![AffectedLocation::Type("Session Configuration".into())],
+            remediation: "Provide a valid authenticated header and owned IDs in config before running audit with test_idor enabled.",
+            first_step: Some("Update your config.toml with a valid 'session.auth_header' and 'session.owned_ids'.".into()),
+            references: vec!["OWASP API1: Broken Object Level Authorization"],
+            status: FindingStatus::Possible,
+            confidence: Confidence::Theoretical,
+            evidence_level: EvidenceLevel::Inconclusive,
+            poc: None,
+        });
+        return Ok(());
+    }
+
+    let headers = effective_headers(
+        extra_headers,
+        Some(config.session.auth_header.as_str()),
+        true,
+    );
+    let mut confirmed_locations: Vec<AffectedLocation> = Vec::new();
+    let mut inconclusive_locations: Vec<AffectedLocation> = Vec::new();
+
+    for location in &idor.affected {
+        let (root, field_name, arg_name) = match location {
+            AffectedLocation::Argument(r, f, a) => (r, f, a),
+            _ => continue,
+        };
+
+        let Some(field) = find_root_field(schema, root.as_str(), field_name.as_str()) else {
+            continue;
+        };
+
+        let op = if root == "Mutation" {
+            "mutation"
+        } else {
+            "query"
+        };
+
+        let mut baseline_payload: Option<String> = None;
+        for owned in &config.session.owned_ids {
+            let mut overrides = HashMap::new();
+            overrides.insert(arg_name.clone(), serde_json::Value::String(owned.clone()));
+            let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, true);
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+            if let Some(data) = field_non_null_data(&resp.data, &field.name) {
+                baseline_payload = Some(data.to_string());
+                break;
+            }
+        }
+
+        let Some(baseline) = baseline_payload else {
+            inconclusive_locations.push(location.clone());
+            continue;
+        };
+
+        let mutated_values = if !idor_payloads.is_empty() {
+            idor_payloads.iter().map(|s| serde_json::Value::String(s.clone())).collect()
+        } else {
+            vec![
+                serde_json::Value::String("1".to_string()),
+                serde_json::Value::String("2".to_string()),
+                serde_json::Value::String("3".to_string()),
+            ]
+        };
+
+        let mut possibility_confirmed = false;
+        for mutated in mutated_values {
+            let mut overrides = HashMap::new();
+            overrides.insert(arg_name.clone(), mutated);
+            let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, true);
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+
+            if let Some(data) = field_non_null_data(&resp.data, &field.name) {
+                let payload = data.to_string();
+                if payload != baseline {
+                    confirmed_locations.push(location.clone());
+                    possibility_confirmed = true;
+                    break;
+                }
+            }
+        }
+
+        if !possibility_confirmed {
+            inconclusive_locations.push(location.clone());
+        }
+    }
+
+    if !confirmed_locations.is_empty() {
+        let poc = confirmed_locations
+            .first()
+            .map(|loc| {
+                let (root, field_name) = match loc {
+                    AffectedLocation::Argument(r, f, _) => (r.as_str(), f.as_str()),
+                    _ => ("Query", "field"),
+                };
+                let arg_name = match loc {
+                    AffectedLocation::Argument(_, _, a) => a.as_str(),
+                    _ => "id",
+                };
+                let keyword = if root == "Mutation" { "mutation" } else { "query" };
+                format!(
+                    "# IDOR confirmed: {}.{}\n{} {{\n  {}({}: \"VICTIM_ID\") {{\n    id\n    __typename\n  }}\n}}",
+                    root, field_name, keyword, field_name, arg_name
+                )
+            });
+
+        unconfirmed.push(Finding {
+            id: "idor",
+            severity: Severity::Medium,
+            title: "Potential IDOR (Ownership Unverified)",
+            description: format!(
+                "### Analysis\n\
+                 {} ID-based operation(s) returned data that DIFFERED from the owned-ID baseline when non-owned identifiers were supplied in an authenticated session. This is a lead, not proof: the server may be resolving objects by ID without an ownership check, or the probed IDs may reference legitimately public resources. Manual verification is required to confirm a real authorization bypass.\n\n\
+                 ### Evidence\n\
+                 - **Operations returning cross-ID data**: {}\n\
+                 - **Indicator**: response payload varied between the owned ID and injected IDs.",
+                confirmed_locations.len(),
+                confirmed_locations.len()
+            ),
+            affected: confirmed_locations,
+            remediation: "Enforce object-level authorization checks by ownership on every ID-based resolver path.",
+            first_step: Some("Manually query a resource using an ID that does NOT belong to your account and confirm whether it returns data you should not be able to see.".into()),
+            references: vec!["OWASP API1: Broken Object Level Authorization", "CWE-639: Authorization Bypass Through User-Controlled Key"],
+            status: FindingStatus::Possible,
+            confidence: Confidence::Possible,
+            evidence_level: EvidenceLevel::Inferred,
+            poc,
+        });
+    }
+
+    if !inconclusive_locations.is_empty() {
+        unconfirmed.push(Finding {
+            id: "idor",
+            severity: Severity::Medium,
+            title: "IDOR Probe Inconclusive",
+            description: format!(
+                "{} IDOR possibility(s) could not be confirmed with current owned IDs and default mutation set.",
+                inconclusive_locations.len()
+            ),
+            affected: inconclusive_locations,
+            remediation: "Expand possibility IDs and include operation-specific payloads to increase probe coverage.",
+            first_step: Some("Provide additional 'idor_payloads' or 'owned_ids' in your config to improve probe precision.".into()),
+            references: vec!["OWASP API1: Broken Object Level Authorization"],
+            status: FindingStatus::Possible,
+            confidence: Confidence::Theoretical,
+            evidence_level: EvidenceLevel::Inconclusive,
+            poc: None,
+        });
+    }
+
+    Ok(())
+}
