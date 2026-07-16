@@ -2,6 +2,7 @@ use crate::audit::utils::{
     build_operation_query, effective_headers, field_non_null_data, is_auth_error,
 };
 use crate::config::AppConfig;
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ pub async fn probe_mutation_privesc(
     rate_limit_ms: u64,
     evasion_level: u8,
     config: &AppConfig,
+    transport: Transport,
     _confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -76,7 +78,7 @@ pub async fn probe_mutation_privesc(
                     }
 
                     let gql_op = build_operation_query(schema, "mutation", field, &overrides, &config.audit.seeds, false);
-                    let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+                    let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, true).await?;
 
                     let success = field_non_null_data(&resp.data, &field.name).is_some() 
                         && !is_auth_error(&resp.errors_text);

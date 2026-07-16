@@ -7,6 +7,7 @@ mod config;
 mod io_ops;
 mod report;
 mod report_visual;
+mod transport;
 mod types;
 mod utils;
 mod traffic;
@@ -23,6 +24,7 @@ use io_ops::{
 use guess::run_guess;
 use report::{print_json_report, print_markdown_report, print_text_report};
 use report_visual::write_visual_report;
+use transport::Transport;
 use types::ReportMeta;
 
 fn print_banner(version: &str) {
@@ -117,7 +119,7 @@ async fn main() {
     };
 
     if let Commands::Scan { url, headers, timeout, rate_limit_ms, probe_only: true, .. } = &cli.command {
-        match io_ops::probe_graphql_endpoint(url, headers, *timeout, *rate_limit_ms, cli.token.as_deref(), cli.user_agent.as_deref(), cli.stealth).await {
+        match io_ops::probe_graphql_endpoint(url, headers, *timeout, *rate_limit_ms, cli.token.as_deref(), cli.user_agent.as_deref(), cli.stealth, cli.transport).await {
             Ok(p) => {
                 if cli.format == OutputFormat::Text {
                     let icon = if p.graphql_confirmed { "✓".green().bold() } else { "!".yellow().bold() };
@@ -130,6 +132,17 @@ async fn main() {
         }
         return;
     }
+
+    // Resolved transport used for introspection, auth discovery, and the active
+    // audit. `Auto` negotiation (see `probe_graphql_endpoint`) only runs for the
+    // `Scan` command when `--probe-first` is enabled; everywhere else (or when
+    // negotiation can't run) `Auto` simply falls back to `PostJson`, matching
+    // today's default POST/JSON behavior.
+    let mut resolved_transport = if cli.transport == Transport::Auto {
+        Transport::PostJson
+    } else {
+        cli.transport
+    };
 
     let schema = if let Some(schema_path) = &cli.use_schema {
         match load_schema_from_file(schema_path) {
@@ -168,15 +181,22 @@ async fn main() {
                         cli.token.as_deref(),
                         cli.user_agent.as_deref(),
                         cli.stealth,
+                        cli.transport,
                     )
                     .await;
                     match probe {
                         Ok(p) if p.graphql_confirmed => {
+                            if cli.transport == Transport::Auto {
+                                resolved_transport = p.resolved_transport;
+                            }
                             if cli.verbose {
                                 println!("  {} {} (HTTP {})", "✓".green().bold(), p.summary, p.http_status);
                             }
                         }
                         Ok(p) => {
+                            if cli.transport == Transport::Auto {
+                                resolved_transport = p.resolved_transport;
+                            }
                             if cli.verbose {
                                 eprintln!("  {} {} (HTTP {})", "!".yellow().bold(), p.summary, p.http_status);
                             }
@@ -200,6 +220,7 @@ async fn main() {
                     cli.token.as_deref(),
                     cli.user_agent.as_deref(),
                     cli.stealth,
+                    resolved_transport,
                 )
                 .await
                 {
@@ -233,6 +254,7 @@ async fn main() {
                     cli.token.as_deref(),
                     cli.user_agent.as_deref(),
                     cli.stealth,
+                    resolved_transport,
                 )
                 .await
                 {
@@ -304,6 +326,7 @@ async fn main() {
                 *rate_limit_ms,
                 cli.user_agent.as_deref(),
                 cli.stealth,
+                resolved_transport,
             )
             .await
             {
@@ -401,6 +424,11 @@ async fn main() {
                 &[],
                 cli.user_agent.as_deref(),
                 cli.stealth,
+                resolved_transport,
+                &cli.skip,
+                &cli.only,
+                cli.no_dos,
+                cli.dry_run,
             )
             .await
             {
@@ -460,6 +488,11 @@ async fn main() {
             idor_payloads,
             cli.user_agent.as_deref(),
             cli.stealth,
+            resolved_transport,
+            &cli.skip,
+            &cli.only,
+            cli.no_dos,
+            cli.dry_run,
         )
         .await
         {

@@ -1,4 +1,5 @@
 use crate::audit::utils::{effective_headers, find_best_probe_target, post_graphql_ext};
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 
@@ -10,15 +11,16 @@ pub async fn probe_dos_expansion(
     rate_limit_ms: u64,
     evasion_level: u8,
     passive_findings: &[Finding],
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
     let headers = effective_headers(extra_headers, None, false);
-    
+
     // 1. Baseline Request
     let Some(target) = find_best_probe_target(schema) else { return Ok(()); };
     let baseline_query = format!("query {{ {} }}", target.name);
-    let baseline_resp = post_graphql_ext(client, url, &headers, &baseline_query, None, rate_limit_ms, evasion_level).await?;
+    let baseline_resp = post_graphql_ext(client, url, &headers, &baseline_query, None, rate_limit_ms, evasion_level, transport, false).await?;
     let baseline_ms = baseline_resp.elapsed_ms;
 
     // 2. Directive Overloading Test
@@ -27,7 +29,7 @@ pub async fn probe_dos_expansion(
         directives.push_str(" @include(if:true)");
     }
     let directive_query = format!("query {{ {}{} }}", target.name, directives);
-    let dir_resp = post_graphql_ext(client, url, &headers, &directive_query, None, rate_limit_ms, evasion_level).await?;
+    let dir_resp = post_graphql_ext(client, url, &headers, &directive_query, None, rate_limit_ms, evasion_level, transport, false).await?;
     
     if dir_resp.elapsed_ms > baseline_ms + 2000 || dir_resp.status == 500 || dir_resp.status == 503 {
          confirmed.push(Finding {
@@ -55,7 +57,7 @@ pub async fn probe_dos_expansion(
         fields.push_str(&format!(" a{}: {}", i, target.name));
     }
     let field_dup_query = format!("query {{{} }}", fields);
-    let field_resp = post_graphql_ext(client, url, &headers, &field_dup_query, None, rate_limit_ms, evasion_level).await?;
+    let field_resp = post_graphql_ext(client, url, &headers, &field_dup_query, None, rate_limit_ms, evasion_level, transport, false).await?;
 
     if field_resp.elapsed_ms > baseline_ms + 2000 || field_resp.status == 500 || field_resp.status == 503 {
         confirmed.push(Finding {
@@ -107,7 +109,7 @@ pub async fn probe_dos_expansion(
                     continue 'cycle;
                 };
                 let recurse_query = format!("query {{ {} {} }}", start_name, selection);
-                let rec_resp = post_graphql_ext(client, url, &headers, &recurse_query, None, rate_limit_ms, evasion_level).await?;
+                let rec_resp = post_graphql_ext(client, url, &headers, &recurse_query, None, rate_limit_ms, evasion_level, transport, false).await?;
 
                 if rec_resp.elapsed_ms > baseline_ms + 2500 || rec_resp.status == 500 || rec_resp.status == 503 {
                     confirmed.push(Finding {

@@ -2,6 +2,7 @@ use crate::audit::utils::{
     build_operation_query, effective_headers, is_sql_error,
 };
 use crate::config::AppConfig;
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ pub async fn probe_sqli(
     rate_limit_ms: u64,
     evasion_level: u8,
     config: &AppConfig,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -77,6 +79,7 @@ pub async fn probe_sqli(
     }
 
     for (op, root, field, arg, path) in targets {
+        let is_mutation = op == "mutation";
         eprintln!("  {} Testing SQLi/NoSQLi/SSTI Injection on {}.{}({})...", "→".cyan(), root, field.name, path);
 
         // Baseline: Send a dummy value first
@@ -84,7 +87,7 @@ pub async fn probe_sqli(
         let mut dummy_overrides = HashMap::new();
         dummy_overrides.insert(arg.name.clone(), build_nested_value(&path, &arg.name, dummy_val));
         let dummy_gql = build_operation_query(schema, op, field, &dummy_overrides, &config.audit.seeds, false);
-        let dummy_resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &dummy_gql.query, Some(dummy_gql.variables.clone()), rate_limit_ms, evasion_level).await?;
+        let dummy_resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &dummy_gql.query, Some(dummy_gql.variables.clone()), rate_limit_ms, evasion_level, transport, is_mutation).await?;
 
         for (payload_val, payload_str) in &internal_payloads {
             // 1. Variable-based Test
@@ -92,7 +95,7 @@ pub async fn probe_sqli(
             overrides.insert(arg.name.clone(), build_nested_value(&path, &arg.name, payload_val.clone()));
             
             let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, false);
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
 
             // 1a. Error-based Detection
             if is_sql_error(&resp.errors_text) {
@@ -189,8 +192,8 @@ pub async fn probe_sqli(
             
             let inlined_call = crate::audit::utils::build_field_call(schema, field, &inlined_overrides, &config.audit.seeds, false);
             let inlined_query = format!("{} {{ {} }}", op, inlined_call);
-            
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &inlined_query, None, rate_limit_ms, evasion_level).await?;
+
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &inlined_query, None, rate_limit_ms, evasion_level, transport, is_mutation).await?;
             if is_sql_error(&resp.errors_text) {
                 confirmed.push(Finding {
                     id: "sql-injection-inline",

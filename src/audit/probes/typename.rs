@@ -1,4 +1,5 @@
 use crate::audit::utils::{effective_headers, post_graphql_ext};
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, Severity};
 use reqwest::Client;
 use serde_json::Value;
@@ -9,6 +10,7 @@ pub async fn probe_typename(
     extra_headers: &[String],
     rate_limit_ms: u64,
     evasion_level: u8,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -20,6 +22,8 @@ pub async fn probe_typename(
         None,
         rate_limit_ms,
         evasion_level,
+        transport,
+        false,
     )
 
     .await?;

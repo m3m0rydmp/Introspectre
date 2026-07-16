@@ -6,6 +6,7 @@ use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::transport::{build_graphql_request, Transport};
 use crate::types::{
     AuthDiscoveryResult, GqlError, GqlField, GqlSchema, IntrospectionResponse, INTROSPECTION_QUERY,
 };
@@ -16,6 +17,7 @@ pub struct EndpointProbeResult {
     pub graphql_confirmed: bool,
     pub http_status: u16,
     pub summary: String,
+    pub resolved_transport: Transport,
 }
 
 /// A small pool of current, realistic browser User-Agent strings. The tool
@@ -75,6 +77,7 @@ pub async fn fetch_introspection(
     token: Option<&str>,
     user_agent: Option<&str>,
     stealth: bool,
+    transport: Transport,
 ) -> Result<GqlSchema, String> {
     let client = build_client(timeout_secs, user_agent, stealth)?;
     let vectors = vec![
@@ -86,7 +89,8 @@ pub async fn fetch_introspection(
     let mut last_error = String::new();
 
     for (name, query) in vectors {
-        let mut req = client.post(url).header("Content-Type", "application/json");
+        // Introspection queries are never mutations.
+        let mut req = build_graphql_request(&client, url, transport, &query, None, false);
 
         for (k, v) in parse_extra_headers(extra_headers) {
             req = req.header(k, v);
@@ -100,8 +104,7 @@ pub async fn fetch_introspection(
             tokio::time::sleep(Duration::from_millis(rate_limit_ms)).await;
         }
 
-        let body = serde_json::json!({ "query": query });
-        let resp = match req.json(&body).send().await {
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
                 last_error = format!("Request failed: {}", e);
@@ -160,10 +163,67 @@ pub async fn probe_graphql_endpoint(
     token: Option<&str>,
     user_agent: Option<&str>,
     stealth: bool,
+    transport: Transport,
 ) -> Result<EndpointProbeResult, String> {
     let client = build_client(timeout_secs, user_agent, stealth)?;
 
-    let mut req = client.post(url).header("Content-Type", "application/json");
+    if transport != Transport::Auto {
+        return probe_with_transport(&client, url, extra_headers, token, rate_limit_ms, transport).await;
+    }
+
+    // Auto-negotiation: try PostJson first (today's default behavior), then
+    // fall back to Get, then Form, keeping the first transport whose knock
+    // request comes back as recognizable GraphQL (or a clear auth gate).
+    let candidates = [Transport::PostJson, Transport::Get, Transport::Form];
+    let mut fallback: Option<EndpointProbeResult> = None;
+    let mut last_error = String::new();
+
+    for (i, candidate) in candidates.iter().enumerate() {
+        let is_last = i == candidates.len() - 1;
+        match probe_with_transport(&client, url, extra_headers, token, rate_limit_ms, *candidate).await {
+            Ok(result) if result.graphql_confirmed || result.http_status == 401 || result.http_status == 403 => {
+                return Ok(result);
+            }
+            Ok(result) => {
+                if fallback.is_none() {
+                    fallback = Some(result);
+                }
+                if is_last {
+                    break;
+                }
+            }
+            Err(e) => {
+                last_error = e;
+                if is_last && fallback.is_none() {
+                    return Err(last_error);
+                }
+            }
+        }
+    }
+
+    Ok(fallback.unwrap_or(EndpointProbeResult {
+        graphql_confirmed: false,
+        http_status: 0,
+        summary: format!(
+            "Auto transport negotiation failed for post-json, get, and form. Last error: {}",
+            last_error
+        ),
+        resolved_transport: Transport::PostJson,
+    }))
+}
+
+/// Send the minimal `__typename` knock query over a single, concrete
+/// transport and classify the response. Shared by the explicit-transport
+/// path and the `Auto` negotiation loop above.
+async fn probe_with_transport(
+    client: &Client,
+    url: &str,
+    extra_headers: &[String],
+    token: Option<&str>,
+    rate_limit_ms: u64,
+    transport: Transport,
+) -> Result<EndpointProbeResult, String> {
+    let mut req = build_graphql_request(client, url, transport, "query ProbeTypename { __typename }", None, false);
 
     for (k, v) in parse_extra_headers(extra_headers) {
         req = req.header(k, v);
@@ -177,10 +237,7 @@ pub async fn probe_graphql_endpoint(
         tokio::time::sleep(Duration::from_millis(rate_limit_ms)).await;
     }
 
-    // Minimal knock that confirms GraphQL without requiring introspection.
-    let body = serde_json::json!({ "query": "query ProbeTypename { __typename }" });
     let resp = req
-        .json(&body)
         .send()
         .await
         .map_err(|e| format!("Probe request failed: {}", e))?;
@@ -194,6 +251,7 @@ pub async fn probe_graphql_endpoint(
                 "HTTP {} from probe endpoint. This path may be GraphQL but requires authentication.",
                 status
             ),
+            resolved_transport: transport,
         });
     }
 
@@ -206,6 +264,7 @@ pub async fn probe_graphql_endpoint(
                 http_status: status.as_u16(),
                 summary: "Probe did not return valid GraphQL JSON. Check endpoint path and Content-Type handling."
                     .to_string(),
+                resolved_transport: transport,
             })
         }
     };
@@ -216,6 +275,7 @@ pub async fn probe_graphql_endpoint(
                 graphql_confirmed: true,
                 http_status: status.as_u16(),
                 summary: "GraphQL confirmed via __typename probe.".to_string(),
+                resolved_transport: transport,
             });
         }
     }
@@ -233,6 +293,7 @@ pub async fn probe_graphql_endpoint(
                 http_status: status.as_u16(),
                 summary: "GraphQL confirmed, but auth is likely required for full access."
                     .to_string(),
+                resolved_transport: transport,
             });
         }
 
@@ -249,6 +310,7 @@ pub async fn probe_graphql_endpoint(
                 http_status: status.as_u16(),
                 summary: "Endpoint behaves like GraphQL (GraphQL-formatted errors observed)."
                     .to_string(),
+                resolved_transport: transport,
             });
         }
 
@@ -256,6 +318,7 @@ pub async fn probe_graphql_endpoint(
             graphql_confirmed: false,
             http_status: status.as_u16(),
             summary: format!("Probe returned inconclusive errors: {}", messages),
+            resolved_transport: transport,
         });
     }
 
@@ -263,6 +326,7 @@ pub async fn probe_graphql_endpoint(
         graphql_confirmed: false,
         http_status: status.as_u16(),
         summary: "Probe response was inconclusive (no GraphQL data/errors).".to_string(),
+        resolved_transport: transport,
     })
 }
 
@@ -348,6 +412,7 @@ pub async fn discover_auth_requirements(
     rate_limit_ms: u64,
     user_agent: Option<&str>,
     stealth: bool,
+    transport: Transport,
 ) -> Result<AuthDiscoveryResult, String> {
     let client = build_client(timeout_secs, user_agent, stealth)?;
     let mut result = AuthDiscoveryResult::new();
@@ -387,7 +452,7 @@ pub async fn discover_auth_requirements(
     let concurrency_limit = 5;
     let url_owned = url.to_string();
 
-    for (_op_keyword, root, query) in targets {
+    for (op_keyword, root, query) in targets {
         while futures.len() >= concurrency_limit {
             if let Some(res) = futures.next().await {
                 process_discovery_result(res, &mut result);
@@ -397,22 +462,22 @@ pub async fn discover_auth_requirements(
         let client = client.clone();
         let url = url_owned.clone();
         let headers = parsed_headers.clone();
+        let is_mutation = op_keyword == "mutation";
 
         futures.push(tokio::spawn(async move {
             if rate_limit_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(rate_limit_ms)).await;
             }
 
-            let mut req = client.post(&url).header("Content-Type", "application/json");
+            let mut req = build_graphql_request(&client, &url, transport, &query, None, is_mutation);
             for (k, v) in headers {
                 req = req.header(k, v);
             }
 
-            let body = serde_json::json!({ "query": query });
             let field_part = query.split_whitespace().nth(2).unwrap_or("unknown");
             let label = format!("{}.{}", root, field_part);
 
-            let resp = req.json(&body).send().await;
+            let resp = req.send().await;
 
             match resp {
                 Ok(r) => {

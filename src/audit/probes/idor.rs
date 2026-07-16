@@ -2,6 +2,7 @@ use crate::audit::utils::{
     build_operation_query, effective_headers, field_non_null_data, find_root_field,
 };
 use crate::config::AppConfig;
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ pub async fn probe_idor(
     evasion_level: u8,
     config: &AppConfig,
     passive_findings: &[Finding],
+    transport: Transport,
     _confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
     idor_payloads: &[String],
@@ -65,13 +67,14 @@ pub async fn probe_idor(
         } else {
             "query"
         };
+        let is_mutation = op == "mutation";
 
         let mut baseline_payload: Option<String> = None;
         for owned in &config.session.owned_ids {
             let mut overrides = HashMap::new();
             overrides.insert(arg_name.clone(), serde_json::Value::String(owned.clone()));
             let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, true);
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
             if let Some(data) = field_non_null_data(&resp.data, &field.name) {
                 baseline_payload = Some(data.to_string());
                 break;
@@ -98,7 +101,7 @@ pub async fn probe_idor(
             let mut overrides = HashMap::new();
             overrides.insert(arg_name.clone(), mutated);
             let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, true);
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
 
             if let Some(data) = field_non_null_data(&resp.data, &field.name) {
                 let payload = data.to_string();

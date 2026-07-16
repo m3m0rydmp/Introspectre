@@ -1,3 +1,4 @@
+use crate::transport::{build_graphql_request, Transport};
 use crate::types::{GqlField, GqlSchema, GqlTypeRef};
 use reqwest::Client;
 use serde_json::Value;
@@ -202,7 +203,7 @@ pub async fn post_graphql(
     query: &str,
     rate_limit_ms: u64,
 ) -> Result<ProbeResponse, String> {
-    post_graphql_ext(client, url, headers, query, None, rate_limit_ms, 0).await
+    post_graphql_ext(client, url, headers, query, None, rate_limit_ms, 0, Transport::PostJson, false).await
 }
 
 pub async fn post_graphql_ext(
@@ -213,6 +214,8 @@ pub async fn post_graphql_ext(
     variables: Option<Value>,
     rate_limit_ms: u64,
     evasion_level: u8,
+    transport: Transport,
+    is_mutation: bool,
 ) -> Result<ProbeResponse, String> {
     if rate_limit_ms > 0 {
         tokio::time::sleep(Duration::from_millis(rate_limit_ms)).await;
@@ -224,21 +227,13 @@ pub async fn post_graphql_ext(
         query.to_string()
     };
 
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json");
+    let mut req = build_graphql_request(client, url, transport, &final_query, variables.as_ref(), is_mutation);
 
     for (k, v) in headers {
         req = req.header(k, v);
     }
 
-    let body = if let Some(vars) = variables {
-        serde_json::json!({ "query": final_query, "variables": vars })
-    } else {
-        serde_json::json!({ "query": final_query })
-    };
-
-    let built = req.json(&body);
+    let built = req;
     let started = Instant::now();
     // Retry once on a transient connection error (e.g. a single-threaded dev
     // server dropping a pooled keep-alive connection) so one flaky request does
@@ -290,7 +285,13 @@ pub async fn post_batched_graphql_ext(
     operations: &[GqlOperation],
     rate_limit_ms: u64,
     evasion_level: u8,
+    transport: Transport,
 ) -> Result<Vec<ProbeResponse>, String> {
+    // Batched requests are always a JSON array body sent over POST — no other
+    // transport can carry a batch, so `transport` is accepted only for call-site
+    // symmetry with `post_graphql_ext` and is otherwise ignored here.
+    let _ = transport;
+
     if rate_limit_ms > 0 {
         tokio::time::sleep(Duration::from_millis(rate_limit_ms)).await;
     }

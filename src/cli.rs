@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+use crate::transport::Transport;
 use crate::types::Severity;
 
 #[derive(Parser)]
@@ -67,6 +68,26 @@ pub struct Cli {
     /// Show verbose details in text output (includes PoC blocks when available)
     #[arg(long, default_value_t = false, global = true)]
     pub verbose: bool,
+
+    /// GraphQL transport: auto (detect), post-json, get, form, graphql
+    #[arg(long, global = true, default_value = "auto")]
+    pub transport: Transport,
+
+    /// Comma-separated probe ids to skip (e.g. sql-injection,ssrf)
+    #[arg(long, global = true, value_delimiter = ',')]
+    pub skip: Vec<String>,
+
+    /// Comma-separated probe ids to run exclusively (overrides --skip default set)
+    #[arg(long, global = true, value_delimiter = ',')]
+    pub only: Vec<String>,
+
+    /// Skip all DoS-class probes (alias amplification, batching, complexity, nested-list expansion)
+    #[arg(long, global = true, default_value_t = false)]
+    pub no_dos: bool,
+
+    /// Print the probes/payloads that would run, without sending any requests
+    #[arg(long, global = true, default_value_t = false)]
+    pub dry_run: bool,
 }
 
 #[derive(Subcommand)]

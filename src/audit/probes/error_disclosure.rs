@@ -1,6 +1,7 @@
 use crate::audit::utils::{
     effective_headers, extract_verbose_error_hint, post_graphql_ext, typo_variant,
 };
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 
@@ -13,6 +14,7 @@ pub async fn probe_verbose_error_disclosure(
     evasion_level: u8,
     _batch_probes: bool,
     _batch_size: u32,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -38,6 +40,8 @@ pub async fn probe_verbose_error_disclosure(
         None,
         rate_limit_ms,
         evasion_level,
+        transport,
+        false,
     )
 
     .await?;

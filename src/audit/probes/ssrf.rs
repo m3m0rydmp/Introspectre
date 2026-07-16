@@ -3,6 +3,7 @@ use crate::audit::utils::{
     build_operation_query, effective_headers, find_root_field,
 };
 use crate::config::AppConfig;
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ pub async fn probe_ssrf(
     evasion_level: u8,
     config: &AppConfig,
     passive_findings: &[Finding],
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -46,6 +48,7 @@ pub async fn probe_ssrf(
         } else {
             "query"
         };
+        let is_mutation = op == "mutation";
 
         eprintln!("  {} Testing SSRF Injection on {}.{}({})...", "→".cyan(), root, field_name, arg_name);
 
@@ -53,7 +56,7 @@ pub async fn probe_ssrf(
         baseline_overrides.insert(arg_name.clone(), serde_json::Value::String("https://example.com/".to_string()));
         let gql_op_base = build_operation_query(schema, op, field, &baseline_overrides, &config.audit.seeds, false);
         let baseline_resp =
-            crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op_base.query, Some(gql_op_base.variables), rate_limit_ms, evasion_level).await?;
+            crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op_base.query, Some(gql_op_base.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
         let baseline_ms = baseline_resp.elapsed_ms;
 
         let payloads = [
@@ -66,7 +69,7 @@ pub async fn probe_ssrf(
             let mut overrides = HashMap::new();
             overrides.insert(arg_name.clone(), serde_json::Value::String(payload.to_string()));
             let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, false);
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
 
             let delayed = resp.elapsed_ms > baseline_ms + 1500;
             let aws_keywords = ["meta-data", "instance-id", "ami-id", "security-credentials"]

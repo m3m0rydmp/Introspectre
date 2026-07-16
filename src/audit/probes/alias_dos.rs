@@ -1,4 +1,5 @@
 use crate::audit::utils::{build_field_call, effective_headers, find_best_probe_target, post_graphql_ext};
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Finding, FindingStatus, Confidence, EvidenceLevel, Severity, GqlSchema};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -11,6 +12,7 @@ pub async fn probe_alias_dos(
     rate_limit_ms: u64,
     evasion_level: u8,
     seed_map: &HashMap<String, String>,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -42,6 +44,8 @@ pub async fn probe_alias_dos(
         None,
         rate_limit_ms,
         evasion_level,
+        transport,
+        false,
     )
     .await?;
 

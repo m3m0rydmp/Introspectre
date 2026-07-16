@@ -12,6 +12,8 @@ Introspectre moves through a layered pipeline, from safe observation to active p
 
 `scan` is passive-only by default; the transition into phase 3 always requires an explicit flag or a dedicated `audit` invocation — the tool never sends offensive payloads implicitly.
 
+Underlying every phase is a **transport layer**: a GraphQL operation can be delivered as a JSON `POST`, a `GET` query string, a form-encoded `POST`, or a raw `application/graphql` body, and servers vary in which they accept. Introspectre negotiates this during the endpoint probe (`--transport auto`) and reuses the working transport for the run, falling back to `POST` for mutations that a `GET` cannot legally carry. This keeps the analysis identical across endpoints that only differ in how they accept a query.
+
 ---
 
 ## 2. Graph-Centric Schema Model
@@ -90,6 +92,8 @@ The HTML report (built on Cytoscape.js) renders the same field-centric multigrap
 
 * **Isolate mode**: given a selected node, the report computes the upstream path back to the root and the full downstream closure of reachable terminal fields, hiding everything else.
 * **Embedded proofs**: findings surfaced during an active run are attached to their corresponding graph nodes, each with a ready-to-run reproduction query and the payload that triggered it inlined — no separate cross-referencing between report and terminal output required.
+
+A subtlety worth stating explicitly: graph nodes are **deduplicated types**, not fields. A type appears exactly once even when dozens of fields return it, and edges carry the field name. Consequently, expanding a node reveals edges to it from *every* already-visible type that references it — so nodes that are not directly connected to the one you clicked can appear, and because the layout is recomputed over the whole visible graph, existing nodes reposition. Isolate mode's downstream-closure behaviour compounds this deliberately. This is inherent to a type-centric model (it keeps the graph compact by not duplicating shared types); the trade-off is that "expand" is a schema-reachability operation, not a strict direct-neighbour reveal.
 
 ---
 

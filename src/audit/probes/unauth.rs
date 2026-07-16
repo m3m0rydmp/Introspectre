@@ -2,6 +2,7 @@ use crate::audit::utils::{
     build_operation_query, effective_headers, field_non_null_data,
     is_auth_error, is_validation_error, GqlOperation,
 };
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlField, GqlSchema, Severity};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ pub async fn probe_unauth_access(
     batch_probes: bool,
     batch_size: u32,
     seed_map: &HashMap<String, String>,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -49,7 +51,7 @@ pub async fn probe_unauth_access(
 
             if query_batch.len() >= batch_size_usize {
                 let batch_ops: Vec<GqlOperation> = query_batch.iter().map(|(o, _, _, _)| o.clone()).collect();
-                let responses = crate::audit::utils::post_batched_graphql_ext(client, url, &headers, &batch_ops, rate_limit_ms, evasion_level).await?;
+                let responses = crate::audit::utils::post_batched_graphql_ext(client, url, &headers, &batch_ops, rate_limit_ms, evasion_level, transport).await?;
 
                 for (idx, (_, _, root, field)) in query_batch.iter().enumerate() {
                     let loc = AffectedLocation::Field((*root).into(), field.name.clone());
@@ -71,7 +73,7 @@ pub async fn probe_unauth_access(
 
         if !query_batch.is_empty() {
             let batch_ops: Vec<GqlOperation> = query_batch.iter().map(|(o, _, _, _)| o.clone()).collect();
-            let responses = crate::audit::utils::post_batched_graphql_ext(client, url, &headers, &batch_ops, rate_limit_ms, evasion_level).await?;
+            let responses = crate::audit::utils::post_batched_graphql_ext(client, url, &headers, &batch_ops, rate_limit_ms, evasion_level, transport).await?;
 
             for (idx, (_, _, root, field)) in query_batch.iter().enumerate() {
                 let loc = AffectedLocation::Field((*root).into(), field.name.clone());
@@ -92,7 +94,8 @@ pub async fn probe_unauth_access(
         for (op, root, field) in targets {
             attempted += 1;
             let gql_op = build_operation_query(schema, op, field, &HashMap::new(), seed_map, false);
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+            let is_mutation = op == "mutation";
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
             let loc = AffectedLocation::Field(root.into(), field.name.clone());
 
             if field_non_null_data(&resp.data, &field.name).is_some() {

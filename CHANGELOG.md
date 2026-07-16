@@ -2,6 +2,20 @@
 
 All notable changes to Introspectre are summarized here at a high level. For the full command/flag surface, see [USAGE.md](./USAGE.md).
 
+## [1.3.0] - 2026-07-16
+
+### Transport
+* GraphQL requests are no longer limited to JSON `POST`. A new `--transport` flag supports `post-json`, `get` (`?query=`), `form` (`application/x-www-form-urlencoded`), and `graphql` (raw `application/graphql` body). The default `auto` negotiates a working transport during the endpoint probe and reuses it, so endpoints that only accept a query string or form body are now scannable instead of failing. Mutations that a `GET` cannot legally carry fall back to `POST` automatically.
+
+### Traffic import
+* Burp Suite HTTP-history XML (`Save items`) is now a supported `--seed-traffic` format alongside HAR (previously HAR-only; Burp XML was unimplemented). Variables are extracted from JSON bodies, `GET` query strings, and form-encoded bodies.
+
+### Safety & scoping
+* Added `--no-dos` (skip all DoS-class probes), `--skip <ids>` / `--only <ids>` (select probes by id), and `--dry-run` (print the probes that would run without sending any request) — useful for testing against fragile self-hosted labs without a self-inflicted DoS.
+
+### Documentation
+* Documented the transport model, the Burp export workflow, safe-testing guidance, and why the visual report's type-centric graph reveals indirect nodes on expansion.
+
 ## [1.2.0] - 2026-07-12
 
 ### Changed
