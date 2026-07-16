@@ -1,4 +1,5 @@
 use crate::audit::utils::{effective_headers, post_graphql_ext};
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 
@@ -9,6 +10,7 @@ pub async fn probe_engine_fingerprint(
     extra_headers: &[String],
     rate_limit_ms: u64,
     evasion_level: u8,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -16,7 +18,7 @@ pub async fn probe_engine_fingerprint(
 
     // 1. Malformed Query for Error Signatures
     let malformed = "query { malformed_field_for_fingerprint }";
-    let resp = post_graphql_ext(client, url, &headers, malformed, None, rate_limit_ms, evasion_level).await?;
+    let resp = post_graphql_ext(client, url, &headers, malformed, None, rate_limit_ms, evasion_level, transport, false).await?;
     
     let mut engine: &'static str = "Unknown";
     let mut confidence = Confidence::Theoretical;

@@ -3,6 +3,7 @@ use crate::audit::utils::{
     build_field_call, effective_headers,
 };
 use crate::config::AppConfig;
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ pub async fn probe_xss(
     rate_limit_ms: u64,
     evasion_level: u8,
     config: &AppConfig,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -47,6 +49,7 @@ pub async fn probe_xss(
     ];
 
     for (op_keyword, root_name, field, arg) in targets {
+        let is_mutation = op_keyword == "mutation";
         eprintln!("  {} Testing XSS Injection on {}.{}({})...", "→".cyan(), root_name, field.name, arg.name);
         let mut confirmed_for_arg = false;
 
@@ -55,11 +58,11 @@ pub async fn probe_xss(
             // Inlined payloads are often reflected in "Invalid Value" or "Type Mismatch" errors
             let mut overrides = HashMap::new();
             overrides.insert(arg.name.clone(), format!("\"{}\"", payload)); // Quoted for inlined reflection
-            
+
             let inlined_call = build_field_call(schema, field, &overrides, &config.audit.seeds, false);
             let query = format!("{} {{ {} }}", op_keyword, inlined_call);
 
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &query, None, rate_limit_ms, evasion_level).await?;
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &query, None, rate_limit_ms, evasion_level, transport, is_mutation).await?;
 
             // Check for reflection in data or errors
             // Use escaped payload matching if necessary, but most reflection is direct

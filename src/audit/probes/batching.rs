@@ -1,4 +1,5 @@
 use crate::audit::utils::{effective_headers, post_batched_graphql_ext, GqlOperation};
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Finding, FindingStatus, Confidence, EvidenceLevel, Severity};
 use reqwest::Client;
 
@@ -8,6 +9,7 @@ pub async fn probe_batching(
     extra_headers: &[String],
     rate_limit_ms: u64,
     evasion_level: u8,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -24,6 +26,7 @@ pub async fn probe_batching(
         &ops,
         rate_limit_ms,
         evasion_level,
+        transport,
     )
     .await?;
 

@@ -3,6 +3,7 @@ use crate::audit::utils::{
     build_operation_query, effective_headers
 };
 use crate::config::AppConfig;
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ pub async fn probe_command_injection(
     rate_limit_ms: u64,
     evasion_level: u8,
     config: &AppConfig,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -49,15 +51,16 @@ pub async fn probe_command_injection(
     ];
 
     for (op, root, field, arg, path) in targets {
+        let is_mutation = op == "mutation";
         eprintln!("  {} Testing Command Injection on {}.{}({})...", "→".cyan(), root, field.name, path);
         for (payload, expected_delay_ms) in &payloads {
             let mut overrides = HashMap::new();
             let payload_val = serde_json::Value::String(payload.to_string());
             overrides.insert(arg.name.clone(), build_nested_value(&path, &arg.name, payload_val));
-            
+
             let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, false);
-            
-            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level).await?;
+
+            let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
             // Use the response's own network timing, which EXCLUDES the pre-request
             // rate-limit sleep. Timing the whole call would count the throttle delay and
             // false-positive on every argument whenever rate_limit_ms is large (>= 5s).

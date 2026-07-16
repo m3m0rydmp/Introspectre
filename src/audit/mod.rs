@@ -8,6 +8,7 @@ use crate::audit::probes::{
     probe_engine_fingerprint, probe_csrf_methods, probe_dos_expansion,
 };
 use crate::config::AppConfig;
+use crate::transport::Transport;
 use crate::types::{Finding, GqlSchema};
 use colored::Colorize;
 use serde::Serialize;
@@ -21,6 +22,29 @@ pub struct AuditReport {
     pub warnings: Vec<String>,
 }
 
+/// DoS-class probe ids, gated together by `--no-dos`.
+const DOS_CLASS_PROBE_IDS: &[&str] = &["alias-dos", "batching", "complexity", "dos-expansion"];
+
+/// Whether a probe with the given stable id should run, per `--only`, `--skip`,
+/// and `--no-dos`. Matching is case-insensitive and trims whitespace so
+/// comma-separated CLI values are forgiving of stray spaces.
+fn probe_enabled(id: &str, only: &[String], skip: &[String], no_dos: bool) -> bool {
+    let norm = |s: &str| s.trim().to_lowercase();
+    let id_norm = norm(id);
+
+    if !only.is_empty() && !only.iter().any(|o| norm(o) == id_norm) {
+        return false;
+    }
+    if skip.iter().any(|s| norm(s) == id_norm) {
+        return false;
+    }
+    if no_dos && DOS_CLASS_PROBE_IDS.contains(&id_norm.as_str()) {
+        return false;
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_audit(
     schema: &GqlSchema,
     url: &str,
@@ -36,7 +60,68 @@ pub async fn run_audit(
     idor_payloads: &[String],
     user_agent: Option<&str>,
     stealth: bool,
+    transport: Transport,
+    skip: &[String],
+    only: &[String],
+    no_dos: bool,
+    dry_run: bool,
 ) -> Result<AuditReport, String> {
+    // Every probe this audit could run, paired with whether config already
+    // enables it. Used for both the dry-run preview and (combined with
+    // `probe_enabled`) the actual gating below.
+    let probe_defs: [(&str, bool); 15] = [
+        ("typename", true),
+        ("fingerprint", true),
+        ("csrf", true),
+        ("error-disclosure", true),
+        ("unauth", config.audit.test_unauth),
+        ("idor", config.audit.test_idor),
+        ("mutation-privesc", config.audit.test_idor),
+        ("ssrf", config.audit.test_injection),
+        ("sql-injection", config.audit.test_injection),
+        ("os-command-injection", config.audit.test_injection),
+        ("xss", config.audit.test_injection),
+        ("complexity", config.audit.test_complexity),
+        ("dos-expansion", config.audit.test_complexity),
+        ("batching", config.audit.test_batching),
+        ("alias-dos", config.audit.test_alias_dos),
+    ];
+
+    if dry_run {
+        println!();
+        println!(
+            "  {}  {}",
+            "introspectre".bold().bright_white(),
+            "active audit (dry run)".bright_black()
+        );
+        println!("  {} {}", "Target:".bright_black(), url.bright_white());
+        println!();
+
+        let mut would_run = 0usize;
+        for (id, cfg_enabled) in probe_defs.iter() {
+            if *cfg_enabled && probe_enabled(id, only, skip, no_dos) {
+                println!("  {}", format!("[dry-run] would run probe: {}", id).cyan());
+                would_run += 1;
+            }
+        }
+
+        println!();
+        println!(
+            "  {} {} of {} probe(s) would run. No requests were sent.",
+            "✓".green().bold(),
+            would_run,
+            probe_defs.len()
+        );
+
+        return Ok(AuditReport {
+            source: url.to_string(),
+            passive_total_findings: passive_findings.len(),
+            confirmed: Vec::new(),
+            unconfirmed: Vec::new(),
+            warnings: vec!["Dry run: no probes were executed and no requests were sent.".to_string()],
+        });
+    }
+
     let client = crate::io_ops::build_client(timeout_secs, user_agent, stealth)?;
     let mut confirmed: Vec<Finding> = Vec::new();
     let mut unconfirmed: Vec<Finding> = Vec::new();
@@ -63,82 +148,93 @@ pub async fn run_audit(
         None
     };
 
-    let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-    let start = std::time::Instant::now();
-    if let Err(e) = probe_typename(
-        &client,
-        url,
-        extra_headers,
-        current_delay,
-        evasion,
-        &mut confirmed,
-        &mut unconfirmed,
-    )
-    .await
-    {
-        eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+    if probe_enabled("typename", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_typename(
+            &client,
+            url,
+            extra_headers,
+            current_delay,
+            evasion,
+            transport,
+            &mut confirmed,
+            &mut unconfirmed,
+        )
+        .await
+        {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
-    if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
     // Engine Fingerprinting
-    let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-    let start = std::time::Instant::now();
-    if let Err(e) = probe_engine_fingerprint(
-        schema,
-        url,
-        &client,
-        extra_headers,
-        current_delay,
-        evasion,
-        &mut confirmed,
-        &mut unconfirmed,
-    )
-    .await
-    {
-        eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+    if probe_enabled("fingerprint", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_engine_fingerprint(
+            schema,
+            url,
+            &client,
+            extra_headers,
+            current_delay,
+            evasion,
+            transport,
+            &mut confirmed,
+            &mut unconfirmed,
+        )
+        .await
+        {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
-    if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
     // CSRF & Method Auditing
-    let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-    let start = std::time::Instant::now();
-    if let Err(e) = probe_csrf_methods(
-        schema,
-        url,
-        &client,
-        extra_headers,
-        current_delay,
-        evasion,
-        &mut confirmed,
-        &mut unconfirmed,
-    )
-    .await
-    {
-        eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+    if probe_enabled("csrf", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_csrf_methods(
+            schema,
+            url,
+            &client,
+            extra_headers,
+            current_delay,
+            evasion,
+            &mut confirmed,
+            &mut unconfirmed,
+        )
+        .await
+        {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
-    if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
-    let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-    let start = std::time::Instant::now();
-    if let Err(e) = probe_verbose_error_disclosure(
-        schema,
-        url,
-        &client,
-        extra_headers,
-        current_delay,
-        evasion,
-        batch_probes,
-        batch_size,
-        &mut confirmed,
-        &mut unconfirmed,
-    )
-    .await
-    {
-        eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+    if probe_enabled("error-disclosure", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_verbose_error_disclosure(
+            schema,
+            url,
+            &client,
+            extra_headers,
+            current_delay,
+            evasion,
+            batch_probes,
+            batch_size,
+            transport,
+            &mut confirmed,
+            &mut unconfirmed,
+        )
+        .await
+        {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
-    if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
-    if config.audit.test_unauth {
+    if config.audit.test_unauth && probe_enabled("unauth", only, skip, no_dos) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_unauth_access(
@@ -151,6 +247,7 @@ pub async fn run_audit(
             batch_probes,
             batch_size,
             &config.audit.seeds,
+            transport,
             &mut confirmed,
             &mut unconfirmed,
         )
@@ -162,175 +259,200 @@ pub async fn run_audit(
     }
 
     if config.audit.test_idor {
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_idor(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            config,
-            passive_findings,
-            &mut confirmed,
-            &mut unconfirmed,
-            idor_payloads,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("idor", only, skip, no_dos) {
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_idor(
+                schema,
+                url,
+                &client,
+                extra_headers,
+                current_delay,
+                evasion,
+                config,
+                passive_findings,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+                idor_payloads,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
         // Mutation PrivEsc Probe
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_mutation_privesc(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            config,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("mutation-privesc", only, skip, no_dos) {
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_mutation_privesc(
+                schema,
+                url,
+                &client,
+                extra_headers,
+                current_delay,
+                evasion,
+                config,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
 
     if config.audit.test_injection {
-        warnings.push(
-            "SSRF probe safety warning: only run with explicit authorization from the target program."
-                .to_string(),
-        );
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_ssrf(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            config,
-            passive_findings,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("ssrf", only, skip, no_dos) {
+            warnings.push(
+                "SSRF probe safety warning: only run with explicit authorization from the target program."
+                    .to_string(),
+            );
+
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_ssrf(
+                schema,
+                url,
+                &client,
+                extra_headers,
+                current_delay,
+                evasion,
+                config,
+                passive_findings,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
         // SQLi Probe
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_sqli(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            config,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("sql-injection", only, skip, no_dos) {
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_sqli(
+                schema,
+                url,
+                &client,
+                extra_headers,
+                current_delay,
+                evasion,
+                config,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
         // Command Injection Probe
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_command_injection(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            config,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("os-command-injection", only, skip, no_dos) {
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_command_injection(
+                schema,
+                url,
+                &client,
+                extra_headers,
+                current_delay,
+                evasion,
+                config,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
         // XSS Probe
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_xss(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            config,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("xss", only, skip, no_dos) {
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_xss(
+                schema,
+                url,
+                &client,
+                extra_headers,
+                current_delay,
+                evasion,
+                config,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
 
     if config.audit.test_complexity {
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_complexity(
-            schema,
-            &client,
-            url,
-            extra_headers,
-            current_delay,
-            evasion,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("complexity", only, skip, no_dos) {
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_complexity(
+                schema,
+                &client,
+                url,
+                extra_headers,
+                current_delay,
+                evasion,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
 
         // Expanded DoS Probes
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_dos_expansion(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            passive_findings,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        if probe_enabled("dos-expansion", only, skip, no_dos) {
+            let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+            let start = std::time::Instant::now();
+            if let Err(e) = probe_dos_expansion(
+                schema,
+                url,
+                &client,
+                extra_headers,
+                current_delay,
+                evasion,
+                passive_findings,
+                transport,
+                &mut confirmed,
+                &mut unconfirmed,
+            )
+            .await
+            {
+                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            }
+            if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
         }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
 
-    if config.audit.test_batching {
+    if config.audit.test_batching && probe_enabled("batching", only, skip, no_dos) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_batching(
@@ -339,6 +461,7 @@ pub async fn run_audit(
             extra_headers,
             current_delay,
             evasion,
+            transport,
             &mut confirmed,
             &mut unconfirmed,
         )
@@ -349,7 +472,7 @@ pub async fn run_audit(
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
 
-    if config.audit.test_alias_dos {
+    if config.audit.test_alias_dos && probe_enabled("alias-dos", only, skip, no_dos) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_alias_dos(
@@ -360,6 +483,7 @@ pub async fn run_audit(
             current_delay,
             evasion,
             &config.audit.seeds,
+            transport,
             &mut confirmed,
             &mut unconfirmed,
         )

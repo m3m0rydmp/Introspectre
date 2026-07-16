@@ -1,4 +1,5 @@
 use crate::audit::utils::{effective_headers, post_graphql_ext};
+use crate::transport::Transport;
 use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
 use reqwest::Client;
 
@@ -9,6 +10,7 @@ pub async fn probe_complexity(
     extra_headers: &[String],
     rate_limit_ms: u64,
     evasion_level: u8,
+    transport: Transport,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -21,6 +23,8 @@ pub async fn probe_complexity(
         None,
         rate_limit_ms,
         evasion_level,
+        transport,
+        false,
     )
     .await?;
 
@@ -91,6 +95,8 @@ pub async fn probe_complexity(
         None,
         rate_limit_ms,
         evasion_level,
+        transport,
+        false,
     )
     .await?;
 
