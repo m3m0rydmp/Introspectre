@@ -2,7 +2,7 @@
 
 Introspectre is a GraphQL **offensive security engine** built in Rust. It combines static schema analysis with active probing to surface logical flaws, implementation errors, and protocol-level risks in GraphQL APIs.
 
-_Current version: **1.3.0** — see the [Changelog](./CHANGELOG.md)._
+_Current version: **1.4.0** — see the [Changelog](./CHANGELOG.md)._
 
 > [!TIP]
 > **Documentation**

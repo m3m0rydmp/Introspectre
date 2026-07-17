@@ -268,15 +268,118 @@
             position: absolute;
             top: 20px;
             right: 20px;
+            max-width: 340px;
             background-color: rgba(15, 17, 25, 0.9);
             border: 1px solid var(--accent);
-            padding: 10px 15px;
+            padding: 10px 26px 10px 15px;
             border-radius: 8px;
             font-size: 0.8rem;
             color: var(--text);
             z-index: 100;
             pointer-events: none;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5), 0 0 12px rgba(252,238,10,0.12);
+        }
+
+        .toast-close {
+            position: absolute;
+            top: 4px;
+            right: 8px;
+            cursor: pointer;
+            pointer-events: auto;
+            color: var(--muted);
+            font-size: 1rem;
+            line-height: 1;
+        }
+
+        .toast-close:hover {
+            color: var(--accent);
+        }
+
+        #toast-reopen-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: none;
+            font-weight: bold;
+        }
+
+        @media (max-width: 700px) {
+            .instruction-toast {
+                top: auto;
+                bottom: 20px;
+                left: 10px;
+                right: 10px;
+                max-width: none;
+                font-size: 0.72rem;
+            }
+            #toast-reopen-btn {
+                top: auto;
+                bottom: 20px;
+                right: 10px;
+            }
+        }
+
+        .legend {
+            position: absolute;
+            top: auto;
+            bottom: 20px;
+            left: 20px;
+            background-color: rgba(15, 17, 25, 0.9);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            z-index: 100;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            font-size: 0.78rem;
+            overflow: hidden;
+            max-width: 220px;
+        }
+
+        .legend-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 8px 12px;
+            cursor: pointer;
+            color: var(--accent);
+            font-family: var(--mono);
+            font-weight: bold;
+            user-select: none;
+        }
+
+        .legend-body {
+            display: none;
+            padding: 4px 12px 10px 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .legend-body.expanded {
+            display: block;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 3px 0;
+            color: var(--text);
+        }
+
+        .legend-swatch {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            box-shadow: 0 0 4px rgba(0,0,0,0.6);
+        }
+
+        @media (max-width: 700px) {
+            .legend {
+                top: auto;
+                bottom: 10px;
+                left: 10px;
+                max-width: 180px;
+            }
         }
 
         /* Context Menu Styles */
@@ -628,7 +731,7 @@
 
             <div id="tab-seeds" class="tab-content">
                 <div id="seeds-list">
-                    <div style="font-size: 0.8rem; color: var(--muted);">No data discovered from traffic yet.</div>
+                    <div style="font-size: 0.8rem; color: var(--muted);">No seed data yet. Supply real values with <code>--seed-traffic &lt;burp.xml|.har&gt;</code> or <code>--seeds &lt;file.json&gt;</code> so active probes use realistic input instead of placeholders.</div>
                 </div>
             </div>
 
@@ -667,12 +770,41 @@
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zM1.5 8a6.5 6.5 0 1113 0 6.5 6.5 0 01-13 0z"/></svg>
             Show All
         </button>
+        <button class="graph-btn" onclick="undoGraph()" title="Undo (Ctrl+Z)">
+            ↶ Back
+        </button>
+        <button class="graph-btn" onclick="redoGraph()" title="Redo (Ctrl+Y)">
+            ↷ Forward
+        </button>
     </div>
-    <div class="instruction-toast">
-        <b>Tip:</b> Click a node to expand its relations.<br>
-        Nodes are <b>types</b> (shown once); edges are field names. Expanding reveals every visible type that links to a node, so indirect nodes may appear and the layout reflows.<br>
-        Scroll to zoom, drag to pan. Use <b>Isolate Mode</b> to focus one path.
+    <div class="legend" id="legend-panel">
+        <div class="legend-header" onclick="toggleLegend()">
+            <span>Legend</span>
+            <span id="legend-toggle-icon">▸</span>
+        </div>
+        <div class="legend-body" id="legend-body">
+            <div class="legend-item"><span class="legend-swatch" style="background:#FF2A6D;"></span> High risk</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#FCEE0A;"></span> Medium risk</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#00F0FF;"></span> Info</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#B967FF;"></span> Mutation-type field</div>
+            <div class="legend-item" style="margin-top:4px;opacity:.7;font-size:11px;">Ring color = type kind:</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#B7C3E8; border-radius:50%; border:2px solid #C9D2E8; box-sizing:border-box;"></span> grey ring = Object</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#B7C3E8; border-radius:50%; border:2px solid #F5A623; box-sizing:border-box;"></span> amber ring = Input object</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#B7C3E8; border-radius:50%; border:2px solid #58C97A; box-sizing:border-box;"></span> green ring = Interface</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#B7C3E8; border-radius:50%; border:2px solid #FF8AC4; box-sizing:border-box;"></span> pink ring = Union</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#B7C3E8; border-radius:50%; border:2px solid #FF8A3D; box-sizing:border-box;"></span> orange ring = Enum / Scalar</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#FFFFFF; border-radius:50%; border:2px solid #00F0FF; box-sizing:border-box;"></span> ◎ cyan ring = Root Query</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#FFFFFF; border-radius:50%; border:2px solid #B967FF; box-sizing:border-box;"></span> ◎ purple ring = Root Mutation</div>
+        </div>
     </div>
+    <div class="instruction-toast" id="instruction-toast">
+        <span class="toast-close" onclick="hideToastPermanently()" title="Dismiss">&times;</span>
+        <b>Tip:</b> Double-click a node to expand · single-click to inspect · hover to highlight.<br>
+        Nodes are <b>types</b> (shown once); edges are field names.<br>
+        Scroll to zoom, drag to pan, drag a node to reposition it. Use <b>Isolate Mode</b> to focus one path.
+        <br>Scalars &amp; enums (leaf value types) are <b>hidden by default</b> to cut clutter and keep the focus on the object/relationship attack surface — click <b>Scalars: HIDDEN</b> in the toolbar to reveal them.
+    </div>
+    <button class="graph-btn" id="toast-reopen-btn" onclick="showInstructionToast()" title="Show tips">?</button>
 
     <script>
         const graphData = {{GRAPH_DATA}};
@@ -728,162 +860,422 @@
             document.getElementById('report-modal').style.display = 'none';
         }
 
-        const cy = cytoscape({
-            container: document.getElementById('cy'),
-            elements: [], // Initialized in resetGraph()
-            style: [
-                {
-                    selector: 'node',
-                    style: {
-                        'label': 'data(label)',
-                        'color': '#d7e0ea',
-                        'background-color': '#161a26',
-                        'width': 40,
-                        'height': 40,
-                        'font-size': '10px',
-                        'font-family': 'ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace',
-                        'text-valign': 'bottom',
-                        'text-margin-y': '5px',
-                        'cursor': 'pointer',
-                        'border-width': 1,
-                        'border-color': '#3a3f5c'
-                    }
-                },
-                {
-                    selector: 'node[risk = "high"]',
-                    style: {
-                        'background-color': '#FF2A6D',
-                        'width': 55,
-                        'height': 55,
-                        'shadow-blur': 22,
-                        'shadow-color': '#FF2A6D',
-                        'shadow-opacity': 0.6,
-                        'shadow-offset-x': 0,
-                        'shadow-offset-y': 0
-                    }
-                },
-                {
-                    selector: 'node[risk = "medium"]',
-                    style: { 'background-color': '#FCEE0A', 'width': 48, 'height': 48 }
-                },
-                {
-                    selector: 'node[risk = "info"]',
-                    style: { 'background-color': '#00F0FF' }
-                },
-                {
-                    selector: 'node[opType = "mutation"]',
-                    style: { 'background-color': '#B967FF' }
-                },
-                {
-                    selector: 'node[isRoot]',
-                    style: { 'border-width': 2, 'border-color': '#FCEE0A' }
-                },
-                {
-                    selector: 'node[kind = "SCALAR"]',
-                    style: { 'shape': 'hexagon', 'background-color': '#7a8296' }
-                },
-                {
-                    selector: 'edge',
-                    style: {
-                        'width': 2,
-                        'line-color': '#363b52',
-                        'target-arrow-color': '#363b52',
-                        'target-arrow-shape': 'triangle',
-                        'curve-style': 'bezier',
-                        'label': 'data(label)',
-                        'font-size': '9px',
-                        'font-family': 'ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace',
-                        'color': '#d7e0ea',
-                        'text-rotation': 'autorotate',
-                        'text-background-color': '#0a0a0f',
-                        'text-background-opacity': 1,
-                        'text-background-padding': '3px',
-                        'text-background-shape': 'round-rectangle',
-                        'cursor': 'pointer',
-                        'opacity': 0.8,
-                        'overlay-padding': '15px',
-                        'overlay-opacity': 0
-                    }
-                },
-                {
-                    selector: 'edge[isDeprecated]',
-                    style: { 'line-style': 'dashed', 'opacity': 0.5 }
-                },
-                {
-                    selector: '.highlighted-edge',
-                    style: {
-                        'line-color': '#00F0FF',
-                        'target-arrow-color': '#00F0FF',
-                        'width': 4,
-                        'opacity': 1.0
-                    }
-                },
-                {
-                    selector: '.highlighted',
-                    style: {
-                        'border-width': 4,
-                        'border-color': '#FCEE0A',
-                        'shadow-blur': 16,
-                        'shadow-color': '#FCEE0A',
-                        'shadow-opacity': 0.5,
-                        'shadow-offset-x': 0,
-                        'shadow-offset-y': 0
-                    }
-                },
-                {
-                    selector: '.expandable',
-                    style: {
-                        'border-width': 3,
-                        'border-style': 'dashed',
-                        'border-color': '#7a8296'
+        // --- Graph engine state (graphology + Sigma) ---
+        let graph = new graphology.Graph({ multi: true, type: "directed" });
+        let renderer = null;
+        let highlightedNodes = new Set();
+        let hoveredNode = null;
+        let draggedNode = null;
+        let didDrag = false;
+
+        function nodeSize(n) {
+            let base = 9; // info / other (nudged up slightly for label legibility)
+            if (n.risk === 'high') base = 15;
+            else if (n.risk === 'medium') base = 12;
+            else if (n.kind === 'SCALAR' || n.kind === 'ENUM') base = 7;
+            if (n.isRoot) base += 6;
+            return base;
+        }
+
+        // Precedence: root wins over risk/opType, so root nodes are always
+        // visually distinct (white fill) — their role (Query vs Mutation) is
+        // instead encoded via the ring color (see nodeRingColor / nodeAttrs below).
+        function nodeColor(n) {
+            if (n.isRoot) return '#FFFFFF';
+            if (n.risk === 'high') return '#FF2A6D';
+            if (n.risk === 'medium') return '#FCEE0A';
+            if (n.opType === 'mutation') return '#B967FF';
+            if (n.risk === 'info') return '#00F0FF';
+            if (n.kind === 'SCALAR' || n.kind === 'ENUM') return '#8792AC';
+            return '#B7C3E8';
+        }
+
+        // Every node renders through the bordered (circle+ring) program — it needs no
+        // texture, so nothing can render invisible. Fill color encodes risk; the ring
+        // color encodes the GraphQL kind (roots keep their cyan/purple role ring).
+        function nodeRingColor(n) {
+            if (n.isRoot) return n.opType === 'mutation' ? '#B967FF' : '#00F0FF';
+            switch (n.kind) {
+                case 'INPUT_OBJECT': return '#F5A623'; // amber
+                case 'INTERFACE':    return '#58C97A'; // green
+                case 'UNION':        return '#FF8AC4'; // pink
+                case 'ENUM':
+                case 'SCALAR':       return '#FF8A3D'; // orange
+                default:             return '#C9D2E8'; // OBJECT + anything else: light grey
+            }
+        }
+
+        function nodeAttrs(n, x, y) {
+            const color = nodeColor(n);
+            return {
+                label: n.label || n.id,
+                size: nodeSize(n),
+                color: color,
+                type: 'bordered',
+                borderColor: nodeRingColor(n),
+                x: x,
+                y: y,
+                kind: n.kind,
+                risk: n.risk,
+                isRoot: !!n.isRoot,
+                isSensitive: !!n.isSensitive,
+                authRequired: !!n.authRequired,
+                opType: n.opType,
+                hasHidden: false,
+                // Root and high-risk nodes always show their label, even when
+                // zoomed out past labelRenderedSizeThreshold.
+                forceLabel: !!n.isRoot || n.risk === 'high'
+            };
+        }
+
+        function edgeAttrs(e) {
+            return {
+                label: e.label,
+                size: 3,
+                color: e.isDeprecated ? '#555' : '#5A6580',
+                isDeprecated: !!e.isDeprecated,
+                args: e.args,
+                weight: e.weight
+            };
+        }
+
+        function addMasterNodeToGraph(id, nearPos, exact) {
+            const n = masterNodes.find(m => m.id === id);
+            if (!n) return false;
+            let x, y;
+            if (nearPos && exact) {
+                x = nearPos.x;
+                y = nearPos.y;
+            } else if (nearPos) {
+                x = nearPos.x + (Math.random() - 0.5) * 0.6;
+                y = nearPos.y + (Math.random() - 0.5) * 0.6;
+            } else {
+                x = Math.random();
+                y = Math.random();
+            }
+            graph.addNode(id, nodeAttrs(n, x, y));
+            return true;
+        }
+
+        function addMasterEdgeToGraph(e) {
+            graph.addEdgeWithKey(e.id, e.source, e.target, edgeAttrs(e));
+        }
+
+        function runForceAtlas(opts) {
+            const n = graph.order;
+            if (n === 0) return;
+            const iterations = (opts && opts.iterations) ? opts.iterations : (n < 400 ? 200 : 100);
+            // preserveExisting: keep already-placed nodes fixed so only newly-added
+            // nodes get laid out (prevents reveal/expand from scattering manual drags).
+            let snapshot = null;
+            if (opts && opts.preserveExisting) {
+                snapshot = {};
+                graph.forEachNode((id, a) => { snapshot[id] = { x: a.x, y: a.y }; });
+            }
+            try {
+                const settings = graphologyLibrary.layoutForceAtlas2.inferSettings(graph);
+                graphologyLibrary.layoutForceAtlas2.assign(graph, { iterations, settings });
+            } catch (err) {
+                console.error('ForceAtlas2 layout failed:', err);
+            }
+            if (snapshot) {
+                for (const id in snapshot) {
+                    if (graph.hasNode(id)) {
+                        graph.setNodeAttribute(id, 'x', snapshot[id].x);
+                        graph.setNodeAttribute(id, 'y', snapshot[id].y);
                     }
                 }
-            ],
-            layout: {
-                name: 'dagre',
-                rankDir: 'LR',
-                nodeSep: 50,
-                rankSep: 100,
-                edgeSep: 10,
-                padding: 50
-            },
-            userZoomingEnabled: true,
-            userPanningEnabled: true,
-            boxSelectionEnabled: false,
-            selectionType: 'single'
+            }
+        }
+
+        // rebuildVisibleGraph: clears the visible graph and repopulates it from the
+        // given master nodes/edges (only edges whose both endpoints are present are added),
+        // then lays it out with ForceAtlas2.
+        function rebuildVisibleGraph(nodes, edges) {
+            graph.clear();
+            nodes.forEach(n => {
+                if (!graph.hasNode(n.id)) {
+                    addMasterNodeToGraph(n.id, null);
+                }
+            });
+            edges.forEach(e => {
+                if (graph.hasNode(e.source) && graph.hasNode(e.target) && !graph.hasEdge(e.id)) {
+                    addMasterEdgeToGraph(e);
+                }
+            });
+            runForceAtlas();
+            updateExpandableMarkers();
+            if (renderer) renderer.refresh();
+        }
+
+        // --- Highlight helpers (used by reducers below) ---
+        function clearHighlight() {
+            highlightedNodes = new Set();
+            if (renderer) renderer.refresh();
+        }
+        function setHighlight(ids) {
+            highlightedNodes = new Set(ids);
+            if (renderer) renderer.refresh();
+        }
+        function addHighlight(id) {
+            highlightedNodes.add(id);
+            if (renderer) renderer.refresh();
+        }
+
+        function nodeReducer(node, data) {
+            const res = { ...data };
+            if (highlightedNodes.size > 0) {
+                if (highlightedNodes.has(node)) {
+                    res.highlighted = true;
+                    res.zIndex = 1;
+                    res.size = data.size + 2;
+                } else {
+                    res.color = '#2a2f3f';
+                    res.label = '';
+                    res.zIndex = 0;
+                }
+            }
+            if (data.hasHidden) {
+                res.size = (res.size || data.size) + 2;
+            }
+            return res;
+        }
+
+        function edgeReducer(edge, data) {
+            const res = { ...data };
+            if (highlightedNodes.size > 0) {
+                const extremities = graph.extremities(edge);
+                const touches = extremities.every(n => highlightedNodes.has(n));
+                if (touches) {
+                    res.color = '#00F0FF';
+                    res.size = 4;
+                    res.zIndex = 1;
+                } else {
+                    res.color = '#33384a';
+                    res.zIndex = 0;
+                }
+            }
+            return res;
+        }
+
+        // Custom hover renderer: Sigma's built-in default hover box is drawn with a
+        // light (#FFF) fill, which made our light labelColor text disappear on hover.
+        // This mirrors Sigma's default hover drawing routine (rounded label box +
+        // label text) but with a DARK box + cyan border so the light label text stays
+        // readable against it.
+        function defaultDrawNodeHover(context, data, settings) {
+            const size = settings.labelSize;
+            const font = settings.labelFont;
+            const weight = settings.labelWeight;
+            context.font = `${weight} ${size}px ${font}`;
+
+            context.fillStyle = '#0a0a0f';
+            context.strokeStyle = '#00F0FF';
+            context.lineWidth = 1;
+            context.shadowOffsetX = 0;
+            context.shadowOffsetY = 0;
+            context.shadowBlur = 8;
+            context.shadowColor = '#000';
+
+            const PADDING = 2;
+
+            if (typeof data.label === 'string' && data.label.length > 0) {
+                const textWidth = context.measureText(data.label).width;
+                const boxWidth = Math.round(textWidth + 5);
+                const boxHeight = Math.round(size + 2 * PADDING);
+                const radius = Math.max(data.size, size / 2) + PADDING;
+                const angleRadian = Math.asin(boxHeight / 2 / radius);
+                const xDeltaCoord = Math.sqrt(Math.abs(Math.pow(radius, 2) - Math.pow(boxHeight / 2, 2)));
+
+                context.beginPath();
+                context.moveTo(data.x + xDeltaCoord, data.y + boxHeight / 2);
+                context.lineTo(data.x + radius + boxWidth, data.y + boxHeight / 2);
+                context.lineTo(data.x + radius + boxWidth, data.y - boxHeight / 2);
+                context.lineTo(data.x + xDeltaCoord, data.y - boxHeight / 2);
+                context.arc(data.x, data.y, radius, angleRadian, -angleRadian);
+                context.closePath();
+                context.fill();
+                context.shadowOffsetX = 0;
+                context.shadowOffsetY = 0;
+                context.shadowBlur = 0;
+                context.stroke();
+            } else {
+                context.beginPath();
+                context.arc(data.x, data.y, data.size + PADDING, 0, Math.PI * 2);
+                context.closePath();
+                context.fill();
+                context.shadowOffsetX = 0;
+                context.shadowOffsetY = 0;
+                context.shadowBlur = 0;
+                context.stroke();
+            }
+
+            // Draw the label text (light color) on top of the dark box.
+            if (data.label) {
+                const labelColorAttr = settings.labelColor && settings.labelColor.attribute
+                    ? (data[settings.labelColor.attribute] || settings.labelColor.color || '#d7e0ea')
+                    : (settings.labelColor ? settings.labelColor.color : '#d7e0ea');
+                context.fillStyle = labelColorAttr;
+                context.font = `${weight} ${size}px ${font}`;
+                context.fillText(data.label, data.x + data.size + 3, data.y + size / 3);
+            }
+        }
+
+        // Every node uses the bordered (circle + ring) program: it needs no texture, so
+        // nothing can render invisible. Fill color = risk; ring color = kind (nodeRingColor).
+        // Ships inside the vendored sigma.min.js UMD bundle as Sigma.rendering.*.
+        const R = Sigma.rendering;
+        const BorderedProgram = R.createNodeBorderProgram({
+            borders: [
+                { size: { value: 0.18 }, color: { attribute: 'borderColor' } },
+                { size: { fill: true },  color: { attribute: 'color' } }
+            ]
         });
 
-        function runLayout() {
-            cy.layout({
-                name: 'dagre',
-                rankDir: 'LR',
-                nodeSep: 60,
-                rankSep: 120,
-                animate: true,
-                animationDuration: 500
-            }).run();
+        const sigmaSettings = {
+            defaultEdgeType: "arrow",
+            renderLabels: true,
+            labelColor: { color: "#d7e0ea" },
+            labelFont: 'ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace',
+            labelRenderedSizeThreshold: 4,
+            labelDensity: 0.8,
+            labelGridCellSize: 60,
+            defaultEdgeColor: "#5A6580",
+            minCameraRatio: 0.05,
+            maxCameraRatio: 12,
+            allowInvalidContainer: true,
+            nodeProgramClasses: { circle: R.NodeCircleProgram, bordered: BorderedProgram },
+            nodeReducer,
+            edgeReducer,
+            defaultDrawNodeHover
+        };
+
+        try {
+            renderer = new Sigma(graph, document.getElementById('cy'), sigmaSettings);
+        } catch (err) {
+            console.warn('Sigma failed to init with arrow edge type, retrying with line edges', err);
+            sigmaSettings.defaultEdgeType = 'line';
+            renderer = new Sigma(graph, document.getElementById('cy'), sigmaSettings);
+        }
+
+        function centerOnNode(nodeId, ratio) {
+            if (!graph.hasNode(nodeId) || !renderer) return;
+            const nd = renderer.getNodeDisplayData(nodeId);
+            if (nd) {
+                renderer.getCamera().animate({ x: nd.x, y: nd.y, ratio: ratio || 0.3 }, { duration: 500 });
+            }
+        }
+
+        // Reuse the instruction toast to briefly show progressive-expansion notices.
+        const instructionToastEl = document.getElementById('instruction-toast');
+        const toastReopenBtnEl = document.getElementById('toast-reopen-btn');
+        const defaultToastHTML = instructionToastEl ? instructionToastEl.innerHTML : '';
+        let toastTimer = null;
+
+        function armAutoHide() {
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(hideToastPermanently, 8000);
+        }
+
+        function hideToastPermanently() {
+            clearTimeout(toastTimer);
+            if (instructionToastEl) instructionToastEl.style.display = 'none';
+            if (toastReopenBtnEl) toastReopenBtnEl.style.display = 'flex';
+        }
+
+        function showInstructionToast() {
+            if (!instructionToastEl) return;
+            instructionToastEl.innerHTML = defaultToastHTML;
+            instructionToastEl.style.display = 'block';
+            if (toastReopenBtnEl) toastReopenBtnEl.style.display = 'none';
+            armAutoHide();
+        }
+
+        function showToast(msg, duration) {
+            if (!instructionToastEl) return;
+            instructionToastEl.style.display = 'block';
+            if (toastReopenBtnEl) toastReopenBtnEl.style.display = 'none';
+            instructionToastEl.innerHTML = `<span class="toast-close" onclick="hideToastPermanently()" title="Dismiss">&times;</span><b>Note:</b> ${msg}`;
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => {
+                instructionToastEl.innerHTML = defaultToastHTML;
+                armAutoHide();
+            }, duration || 3000);
+        }
+
+        // Auto-hide the tip toast a few seconds after load; the "?" button re-shows it.
+        armAutoHide();
+
+        function toggleLegend() {
+            const body = document.getElementById('legend-body');
+            const icon = document.getElementById('legend-toggle-icon');
+            if (!body) return;
+            const expanded = body.classList.toggle('expanded');
+            if (icon) icon.textContent = expanded ? '▾' : '▸';
+        }
+
+        // Shims exposing the old cytoscape node/edge wrapper API (.id()/.data()) so callers written against it keep working unchanged.
+        function makeNodeShim(nodeObj) {
+            return { id: () => nodeObj.id, data: (key) => nodeObj[key] };
+        }
+        function makeEdgeShim(edgeData) {
+            return {
+                data: () => edgeData,
+                source: () => ({ id: () => edgeData.source }),
+                target: () => ({ id: () => edgeData.target })
+            };
+        }
+
+        // --- Undo / redo history for visible-graph mutations ---
+        let historyStack = [];
+        let redoStack = [];
+        const HISTORY_MAX = 50;
+
+        function snapshotGraph() {
+            return { nodeIds: graph.nodes(), edgeIds: graph.edges() };
+        }
+
+        function pushHistory() {
+            historyStack.push(snapshotGraph());
+            if (historyStack.length > HISTORY_MAX) historyStack.shift();
+            redoStack = [];
+        }
+
+        function restoreSnapshot(snap) {
+            const nodes = snap.nodeIds.map(id => masterNodes.find(n => n.id === id)).filter(Boolean);
+            const edges = snap.edgeIds.map(id => masterEdges.find(e => e.id === id)).filter(Boolean);
+            rebuildVisibleGraph(nodes, edges);
+        }
+
+        function undoGraph() {
+            if (!historyStack.length) return;
+            redoStack.push(snapshotGraph());
+            restoreSnapshot(historyStack.pop());
+        }
+
+        function redoGraph() {
+            if (!redoStack.length) return;
+            historyStack.push(snapshotGraph());
+            restoreSnapshot(redoStack.pop());
         }
 
         function resetGraph() {
-            cy.elements().remove();
+            pushHistory();
             const rootNodes = masterNodes.filter(n => n.isRoot);
-            if (hideScalars) {
-                // If hiding scalars, we only add root nodes (which are usually OBJECTS)
-                cy.add(rootNodes.filter(n => n.kind !== 'SCALAR' && n.kind !== 'ENUM').map(n => ({ data: n })));
-            } else {
-                cy.add(rootNodes.map(n => ({ data: n })));
-            }
-            updateExpandableMarkers();
-            runLayout();
+            const nodesToAdd = hideScalars
+                ? rootNodes.filter(n => n.kind !== 'SCALAR' && n.kind !== 'ENUM')
+                : rootNodes;
+            rebuildVisibleGraph(nodesToAdd, []);
         }
 
         function showAllNodes() {
-            if (masterNodes.length > 500 && !confirm(`This schema has ${masterNodes.length} types. Rendering everything may be slow. Continue?`)) return;
-            cy.elements().remove();
-            
+            if (masterNodes.length > 150 && !confirm(`This schema has ${masterNodes.length} types and ${masterEdges.length} relations. Rendering everything at once may be heavy. Continue?`)) return;
+
+            pushHistory();
+
             let nodesToAdd = masterNodes;
             let edgesToAdd = masterEdges;
-            
+
             if (hideScalars) {
                 nodesToAdd = masterNodes.filter(n => n.kind !== 'SCALAR' && n.kind !== 'ENUM');
                 edgesToAdd = masterEdges.filter(e => {
@@ -892,23 +1284,27 @@
                 });
             }
 
-            cy.add(nodesToAdd.map(n => ({ data: n })));
-            cy.add(edgesToAdd.map(e => ({ data: e })));
-            runLayout();
+            rebuildVisibleGraph(nodesToAdd, edgesToAdd);
         }
 
         let hideScalars = true; // Default to true to reduce clutter
         function toggleScalars() {
             hideScalars = !hideScalars;
             const btn = document.getElementById('filter-scalars-btn');
-            btn.innerHTML = hideScalars ? 
-                `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg> Scalars: HIDDEN` : 
+            btn.innerHTML = hideScalars ?
+                `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg> Scalars: HIDDEN` :
                 `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg> Scalars: SHOWN`;
             btn.classList.toggle('btn-active', hideScalars);
-            
+
             if (hideScalars) {
-                const toRemove = cy.nodes().filter(n => n.data('kind') === 'SCALAR' || n.data('kind') === 'ENUM');
-                cy.remove(toRemove);
+                pushHistory();
+                const toRemove = [];
+                graph.forEachNode((id, attrs) => {
+                    if (attrs.kind === 'SCALAR' || attrs.kind === 'ENUM') toRemove.push(id);
+                });
+                toRemove.forEach(id => graph.dropNode(id));
+                updateExpandableMarkers();
+                if (renderer) renderer.refresh();
             }
         }
 
@@ -916,9 +1312,26 @@
         document.getElementById('filter-scalars-btn').classList.add('btn-active');
         document.getElementById('filter-scalars-btn').innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"/></svg> Scalars: HIDDEN`;
 
-        function expandNode(nodeId) {
+        const EXPAND_CAP = 15;
+
+        function rankByRisk(edges) {
+            const riskRank = r => r === 'high' ? 3 : r === 'medium' ? 2 : r === 'info' ? 1 : 0;
+            return edges.slice().sort((a, b) => {
+                const an = masterNodes.find(n => n.id === a.target);
+                const bn = masterNodes.find(n => n.id === b.target);
+                const ar = an ? riskRank(an.risk) : 0;
+                const br = bn ? riskRank(bn.risk) : 0;
+                if (br !== ar) return br - ar;
+                return a.target.localeCompare(b.target);
+            });
+        }
+
+        // Reveals outgoing edges/nodes from nodeId. If capLimit is finite and there are
+        // more newly-revealable edges than that, only the top capLimit (by target risk,
+        // then name) are added.
+        function revealFromNode(nodeId, capLimit) {
             let outgoing = masterEdges.filter(e => e.source === nodeId);
-            
+
             if (hideScalars) {
                 outgoing = outgoing.filter(e => {
                     const target = masterNodes.find(n => n.id === e.target);
@@ -926,37 +1339,86 @@
                 });
             }
 
-            let addedCount = 0;
-            
-            outgoing.forEach(e => {
-                if (cy.$id(e.target).empty()) {
-                    const node = masterNodes.find(n => n.id === e.target);
-                    if (node) cy.add({ data: node });
-                    addedCount++;
+            const newOutgoing = outgoing.filter(e => !graph.hasNode(e.target) || !graph.hasEdge(e.id));
+            let toReveal = newOutgoing;
+            let capped = false;
+            if (isFinite(capLimit) && newOutgoing.length > capLimit) {
+                capped = true;
+                toReveal = rankByRisk(newOutgoing).slice(0, capLimit);
+            }
+
+            if (toReveal.length === 0) return { added: 0, capped: false, total: newOutgoing.length };
+
+            const parentPos = graph.hasNode(nodeId)
+                ? { x: graph.getNodeAttribute(nodeId, 'x'), y: graph.getNodeAttribute(nodeId, 'y') }
+                : null;
+
+            // New (not-yet-present) targets get placed on an angle-spaced ring around
+            // the parent so a large batch (e.g. a root's children) fans out instead of
+            // stacking on the parent and staying compressed under the pinned relax pass.
+            const newTargets = toReveal.filter(e => !graph.hasNode(e.target));
+            const k = newTargets.length;
+
+            // Estimate a layout spacing unit from the current graph extent.
+            let unit = 8;
+            if (parentPos && graph.order > 1) {
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                graph.forEachNode((id, a) => {
+                    if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
+                    if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
+                });
+                const diag = Math.hypot(maxX - minX, maxY - minY);
+                unit = diag > 1e-3 ? diag / Math.sqrt(graph.order) : 8;
+            }
+            const R = unit * Math.min(1.7 + k * 0.22, 5.5);
+            // Deterministic-ish angular offset per parent so repeated expands don't all
+            // start at angle 0.
+            let parentHash = 0;
+            for (let i = 0; i < nodeId.length; i++) parentHash = (parentHash + nodeId.charCodeAt(i)) % 360;
+            const angOffset = (parentHash / 360) * 2 * Math.PI;
+
+            let added = 0;
+            let ringIdx = 0;
+            toReveal.forEach(e => {
+                if (!graph.hasNode(e.target)) {
+                    let pos = parentPos;
+                    if (parentPos && k > 0) {
+                        const ang = (ringIdx / k) * 2 * Math.PI + angOffset;
+                        pos = {
+                            x: parentPos.x + R * Math.cos(ang) + (Math.random() - 0.5) * 0.3,
+                            y: parentPos.y + R * Math.sin(ang) + (Math.random() - 0.5) * 0.3
+                        };
+                        ringIdx++;
+                    }
+                    if (addMasterNodeToGraph(e.target, pos, true)) added++;
                 }
-                if (cy.$id(e.id).empty()) {
-                    cy.add({ data: e });
-                    addedCount++;
+                if (!graph.hasEdge(e.id) && graph.hasNode(e.source) && graph.hasNode(e.target)) {
+                    addMasterEdgeToGraph(e);
+                    added++;
                 }
             });
 
-            if (addedCount > 0) {
+            return { added, capped, total: newOutgoing.length };
+        }
+
+        function expandNode(nodeId) {
+            pushHistory();
+
+            const result = revealFromNode(nodeId, EXPAND_CAP);
+
+            if (result.added > 0) {
+                runForceAtlas({ iterations: Math.min(120, 40 + result.added * 2), preserveExisting: true });
                 updateExpandableMarkers();
-                runLayout();
+                if (renderer) renderer.refresh();
+            }
+
+            if (result.capped) {
+                showToast(`Showing ${EXPAND_CAP} of ${result.total} — right-click → Expand all`);
             }
         }
 
         // Context Menu Logic
         let selectedNodeId = null;
-        cy.on('cxttap', 'node', function(evt) {
-            const node = evt.target;
-            selectedNodeId = node.id();
-            
-            const menu = document.getElementById('ctx-menu');
-            menu.style.display = 'block';
-            menu.style.left = evt.renderedPosition.x + 'px';
-            menu.style.top = evt.renderedPosition.y + 'px';
-        });
 
         window.addEventListener('click', function() {
             document.getElementById('ctx-menu').style.display = 'none';
@@ -968,15 +1430,23 @@
 
         function ctxExpandAll() {
             if (!selectedNodeId) return;
-            
+
+            let totalAdded = 0;
             const expandRecursive = (id, depth) => {
                 if (depth > 3) return;
-                expandNode(id);
+                const r = revealFromNode(id, Infinity);
+                totalAdded += r.added;
                 const children = masterEdges.filter(e => e.source === id).map(e => e.target);
                 children.forEach(c => expandRecursive(c, depth + 1));
             };
-            
+
             expandRecursive(selectedNodeId, 0);
+
+            if (totalAdded > 0) {
+                runForceAtlas({ iterations: 100 });
+                updateExpandableMarkers();
+                if (renderer) renderer.refresh();
+            }
         }
 
         function ctxTraceRoot() {
@@ -984,22 +1454,20 @@
         }
 
         function ctxHideNode() {
-            if (selectedNodeId) cy.$id(selectedNodeId).remove();
+            if (selectedNodeId && graph.hasNode(selectedNodeId)) {
+                graph.dropNode(selectedNodeId);
+                updateExpandableMarkers();
+                if (renderer) renderer.refresh();
+            }
         }
 
         function updateExpandableMarkers() {
-            cy.nodes().forEach(node => {
-                const id = node.id();
+            graph.forEachNode((id) => {
                 const hasOutgoingInMaster = masterEdges.some(e => e.source === id);
                 const allOutgoingShown = masterEdges
                     .filter(e => e.source === id)
-                    .every(e => !cy.$id(e.id).empty());
-                
-                if (hasOutgoingInMaster && !allOutgoingShown) {
-                    node.addClass('expandable');
-                } else {
-                    node.removeClass('expandable');
-                }
+                    .every(e => graph.hasEdge(e.id));
+                graph.setNodeAttribute(id, 'hasHidden', hasOutgoingInMaster && !allOutgoingShown);
             });
         }
 
@@ -1084,14 +1552,9 @@
         }
 
         function performIsolation(targetNodeId) {
+            pushHistory();
             const discovery = getFullPathDiscovery(targetNodeId);
-            cy.elements().remove();
-            
-            cy.add(discovery.nodes.map(n => ({ data: n })));
-            cy.add(discovery.edges.map(e => ({ data: e })));
-            
-            updateExpandableMarkers();
-            runLayout();
+            rebuildVisibleGraph(discovery.nodes, discovery.edges);
         }
 
         function ensurePathVisible(targetNodeId) {
@@ -1103,10 +1566,11 @@
             // Find path from any root in master data
             const rootIds = masterNodes.filter(n => n.isRoot).map(n => n.id);
             if (rootIds.includes(targetNodeId)) {
-                if (cy.$id(targetNodeId).empty()) {
-                    const node = masterNodes.find(n => n.id === targetNodeId);
-                    cy.add({ data: node });
-                    runLayout();
+                if (!graph.hasNode(targetNodeId)) {
+                    addMasterNodeToGraph(targetNodeId, null);
+                    runForceAtlas({ preserveExisting: true });
+                    updateExpandableMarkers();
+                    if (renderer) renderer.refresh();
                 }
                 return;
             }
@@ -1137,27 +1601,29 @@
 
             if (path) {
                 path.forEach((nodeId, i) => {
-                    if (cy.$id(nodeId).empty()) {
-                        const node = masterNodes.find(n => n.id === nodeId);
-                        if (node) cy.add({ data: node });
+                    if (!graph.hasNode(nodeId)) {
+                        addMasterNodeToGraph(nodeId, null);
                     }
                     if (i > 0) {
                         const prevNodeId = path[i-1];
                         const edge = masterEdges.find(e => e.source === prevNodeId && e.target === nodeId);
-                        if (edge && cy.$id(edge.id).empty()) {
-                            cy.add({ data: edge });
+                        if (edge && !graph.hasEdge(edge.id) && graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
+                            addMasterEdgeToGraph(edge);
                         }
                     }
                 });
                 updateExpandableMarkers();
-                runLayout();
+                runForceAtlas({ preserveExisting: true });
+                if (renderer) renderer.refresh();
             } else {
                 // Root node case or unreachable
-                if (cy.$id(targetNodeId).empty()) {
+                if (!graph.hasNode(targetNodeId)) {
                     const node = masterNodes.find(n => n.id === targetNodeId);
                     if (node) {
-                        cy.add({ data: node });
-                        runLayout();
+                        addMasterNodeToGraph(targetNodeId, null);
+                        runForceAtlas({ preserveExisting: true });
+                        updateExpandableMarkers();
+                        if (renderer) renderer.refresh();
                     }
                 }
             }
@@ -1166,7 +1632,7 @@
         function showSummary() {
             document.getElementById('summary-pane').style.display = 'block';
             document.getElementById('details-pane').style.display = 'none';
-            cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
+            clearHighlight();
         }
 
         function processQueryForSeeds(query) {
@@ -1189,10 +1655,19 @@
             document.getElementById('summary-pane').style.display = 'none';
             document.getElementById('details-pane').style.display = 'block';
 
+            // Resolve which affected types actually exist in the master graph data
+            // before rendering, so we can show explicit feedback either way instead
+            // of silently no-oping when a type isn't present/visible.
+            const affectedTypes = [...new Set(finding.affected.map(a => String(a).split('.')[0]))];
+            const missingTypes = affectedTypes.filter(t => !masterNodes.some(n => n.id === t));
+            const shownTypes = affectedTypes.filter(t => !missingTypes.includes(t));
+
             let html = `
                 <div class="card severity-${finding.severity.toLowerCase()}">
                     <button class="back-btn" onclick="showSummary()">← Back to list</button>
                     <h3>[${finding.id}] ${finding.title}</h3>
+                    <p style="font-size:0.8rem;">Highlighted in graph: <b>${shownTypes.join(', ') || '—'}</b></p>
+                    ${missingTypes.length ? `<div style="color:var(--med)">⚠ Not present in the current graph view: ${missingTypes.join(', ')}</div>` : ''}
                     <p>${finding.description}</p>
                     <strong>Remediation:</strong>
                     <p style="color: var(--low)">${finding.remediation}</p>
@@ -1209,7 +1684,7 @@
 
                 html += `
                     <div class="card">
-                        <strong>${aff}</strong>
+                        <strong onclick="focusAffected('${aff.split('.')[0]}')" style="cursor:pointer;text-decoration:underline dotted;">${aff}</strong>
                         <div class="toggle-group" id="finding-toggle-${index}">
                             <button class="toggle-btn active" onclick="toggleFindingQuery(${index}, 'literal')">Literal</button>
                             <button class="toggle-btn" onclick="toggleFindingQuery(${index}, 'variable')">Variables</button>
@@ -1233,14 +1708,33 @@
 
             document.getElementById('details-content').innerHTML = html;
 
-            // Highlight path in graph
-            cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
-            finding.affected.forEach(aff => {
-                const typeName = aff.split('.')[0];
-                ensurePathVisible(typeName);
-                cy.$(`node[id = "${typeName}"]`).addClass('highlighted');
+            // Highlight path in graph: resolve each affected type against the master
+            // node list, reveal + highlight the ones that exist, and center the view
+            // on the first one shown. Types not present in the schema/current view
+            // are reported above instead of silently producing no visible highlight.
+            clearHighlight();
+            let firstShown = null;
+            affectedTypes.forEach(t => {
+                if (masterNodes.some(n => n.id === t)) {
+                    ensurePathVisible(t);
+                    addHighlight(t);
+                    if (!firstShown) firstShown = t;
+                }
             });
+            renderer && renderer.refresh();
+            if (firstShown) centerOnNode(firstShown, 0.4);
         }
+
+        // focusAffected: called from the clickable "Affected" labels in the details
+        // pane to jump the graph to a specific affected type.
+        window.focusAffected = function(typeName) {
+            if (!masterNodes.some(n => n.id === typeName)) return;
+            ensurePathVisible(typeName);
+            clearHighlight();
+            addHighlight(typeName);
+            renderer && renderer.refresh();
+            centerOnNode(typeName, 0.4);
+        };
 
         function getQueryForEdge(edgeData) {
             const sourceId = edgeData.source;
@@ -1421,11 +1915,9 @@
         function showPathDetails(edge) {
             try {
                 const q = getQueryForEdge(edge.data());
-                
-                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
-                edge.addClass('highlighted-edge');
-                edge.source().addClass('highlighted');
-                edge.target().addClass('highlighted');
+
+                clearHighlight();
+                setHighlight([edge.source().id(), edge.target().id()]);
 
                 document.getElementById('summary-pane').style.display = 'none';
                 document.getElementById('details-pane').style.display = 'block';
@@ -1520,25 +2012,21 @@
         window.selectSearchResult = function(type, id) {
             searchSuggestions.style.display = 'none';
             searchInput.value = '';
-            
+
             if (type === 'node') {
                 ensurePathVisible(id);
-                const node = cy.$id(id);
-                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
-                node.addClass('highlighted');
-                cy.center(node);
-                cy.zoom({level: 1.5, position: node.position()});
-                node.trigger('tap');
+                clearHighlight();
+                addHighlight(id);
+                centerOnNode(id, 0.3);
+                handleNodeClick(id);
             } else if (type === 'edge') {
                 const edgeData = masterEdges.find(e => e.id === id);
                 if (edgeData) {
                     ensurePathVisible(edgeData.target);
-                    const edge = cy.$id(id);
-                    cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
-                    edge.addClass('highlighted-edge');
-                    cy.center(edge);
-                    cy.zoom({level: 1.5, position: edge.midpoint()});
-                    edge.trigger('tap');
+                    clearHighlight();
+                    setHighlight([edgeData.source, edgeData.target]);
+                    centerOnNode(edgeData.target, 0.3);
+                    showPathDetails(makeEdgeShim(edgeData));
                 }
             }
         };
@@ -1657,15 +2145,13 @@
                     childItem.onclick = (ev) => {
                         ev.stopPropagation();
                         ensurePathVisible(edge.target);
-                        const cyEdge = cy.$id(edge.id);
-                        if (!cyEdge.empty()) {
-                            cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
-                            cyEdge.addClass('highlighted-edge');
-                            cy.center(cyEdge);
-                            cyEdge.trigger('tap');
+                        if (graph.hasEdge(edge.id)) {
+                            clearHighlight();
+                            setHighlight([edge.source, edge.target]);
+                            centerOnNode(edge.target, 0.3);
+                            showPathDetails(makeEdgeShim(edge));
                         } else {
-                            const tNode = cy.$id(edge.target);
-                            tNode.trigger('tap');
+                            handleNodeClick(edge.target);
                         }
                         document.querySelectorAll('.tree-item').forEach(i => i.classList.remove('selected'));
                         childItem.classList.add('selected');
@@ -1680,12 +2166,10 @@
             item.onclick = (e) => {
                 e.stopPropagation();
                 ensurePathVisible(nodeId);
-                const node = cy.$id(nodeId);
-                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
-                node.addClass('highlighted');
-                cy.center(node);
-                cy.zoom({level: 1.2, position: node.position()});
-                node.trigger('tap');
+                clearHighlight();
+                addHighlight(nodeId);
+                centerOnNode(nodeId, 1.2);
+                handleNodeClick(nodeId);
                 document.querySelectorAll('.tree-item').forEach(i => i.classList.remove('selected'));
                 item.classList.add('selected');
             };
@@ -1724,20 +2208,20 @@
         switchTab('findings');
         renderFindingsList();
 
-        cy.on('tap', function(evt){
-            if(evt.target === cy){
+        if (renderer) {
+            renderer.on('clickStage', function(){
                 showSummary();
-            }
-        });
+            });
+        }
 
         function showNodeQueries(node) {
             const typeName = node.id();
             const kind = node.data('kind');
-            
+
             // Search through MASTER edges but FILTER by those that are ACTUALLY RENDERED in the graph
             // This ensures we only show "what the user sees connected to it"
             const incomingEdges = masterEdges.filter(e => {
-                return e.target === typeName && !cy.$id(e.id).empty();
+                return e.target === typeName && graph.hasEdge(e.id);
             });
 
             document.getElementById('summary-pane').style.display = 'none';
@@ -1784,101 +2268,163 @@
             document.getElementById('details-content').innerHTML = html;
         }
 
-        let nodeTapStartPos = null;
-        let nodeTapStartTime = null;
-        let dragLockTimer = null;
+        // --- Click / hover / drag / context-menu wiring (Sigma events) ---
 
-        cy.on('grab', 'node', function(evt) {
-            const node = evt.target;
-            nodeTapStartPos = Object.assign({}, node.position());
-            nodeTapStartTime = Date.now();
-            
-            // Lock node initially to prevent 'dragging a bit' during a click
-            node.lock();
+        // selectNode: the "inspect" half of node interaction — highlights the
+        // neighborhood, syncs the schema tree, and shows details/queries. Does NOT
+        // expand or isolate the graph (that's handled separately, see expandNode /
+        // performIsolation and the doubleClickNode wiring below).
+        function selectNode(nodeId) {
+            const nodeObj = masterNodes.find(n => n.id === nodeId);
+            if (!nodeObj) return;
 
-            // Unlock after 200ms of holding, even if no movement occurred
-            dragLockTimer = setTimeout(() => {
-                node.unlock();
-            }, 200);
-        });
+            const neighborhood = [nodeId];
+            if (graph.hasNode(nodeId)) {
+                graph.forEachNeighbor(nodeId, (neighbor) => neighborhood.push(neighbor));
+            }
+            setHighlight(neighborhood);
 
-        cy.on('drag', 'node', function(evt) {
-            const node = evt.target;
-            if (!nodeTapStartPos) return;
+            // --- Graph-to-Tree Interaction ---
+            const treeItem = document.querySelector(`.tree-item[data-id="${nodeId}"]`);
+            if (treeItem) {
+                switchTab('schema');
+                document.querySelectorAll('.tree-item').forEach(i => i.classList.remove('selected'));
+                treeItem.classList.add('selected');
+                treeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
 
-            const currentPos = node.position();
-            const dx = currentPos.x - nodeTapStartPos.x;
-            const dy = currentPos.y - nodeTapStartPos.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-
-            // If the user has moved more than 10 pixels, they probably intend to drag
-            if (distance > 10) {
-                node.unlock();
-                if (dragLockTimer) {
-                    clearTimeout(dragLockTimer);
-                    dragLockTimer = null;
+            if (nodeObj.kind === 'SCALAR' || nodeObj.kind === 'ENUM') {
+                showNodeQueries(makeNodeShim(nodeObj));
+            } else {
+                const relevantFindings = findingsData.filter(f => f.affected.some(aff => aff.startsWith(nodeId)));
+                if (relevantFindings.length > 0) {
+                    showDetails(relevantFindings[0].id);
                 }
             }
-        });
+        }
 
-        cy.on('free', 'node', function(evt) {
-            const node = evt.target;
-            const timeElapsed = Date.now() - (nodeTapStartTime || Date.now());
-            
-            // Always ensure node is unlocked when released
-            node.unlock();
-            if (dragLockTimer) {
-                clearTimeout(dragLockTimer);
-                dragLockTimer = null;
+        // handleNodeClick: used by non-graph entry points (search results, schema
+        // tree clicks) where a single activation is expected to both reveal/expand
+        // the node AND select it. The Sigma canvas itself no longer wires this to a
+        // single click — see the clickNode/doubleClickNode wiring below.
+        function handleNodeClick(nodeId) {
+            const nodeObj = masterNodes.find(n => n.id === nodeId);
+            if (!nodeObj) return;
+
+            if (isolateMode) {
+                performIsolation(nodeId);
+            } else {
+                expandNode(nodeId);
             }
 
-            // Click detection: Short time AND short distance
-            const endPos = node.position();
-            const dx = endPos.x - (nodeTapStartPos ? nodeTapStartPos.x : endPos.x);
-            const dy = endPos.y - (nodeTapStartPos ? nodeTapStartPos.y : endPos.y);
-            const distance = Math.sqrt(dx * dx + dy * dy);
+            selectNode(nodeId);
+        }
 
-            if (timeElapsed < 250 && distance < 10) {
-                const typeName = node.id();
-                const kind = node.data('kind');
-                const isRoot = node.data('isRoot');
+        if (renderer) {
+            // Single click only selects/inspects; expansion happens on double-click
+            // (see doubleClickNode below) so a stray click doesn't blow up the graph.
+            renderer.on('clickNode', ({ node }) => {
+                // A node drag ends with a synthetic click; don't let it select/relayout/zoom.
+                if (didDrag) { didDrag = false; return; }
+                selectNode(node);
+            });
 
+            renderer.on('doubleClickNode', (e) => {
+                if (e.preventSigmaDefault) e.preventSigmaDefault();
                 if (isolateMode) {
-                    performIsolation(typeName);
+                    performIsolation(e.node);
                 } else {
-                    expandNode(typeName);
+                    expandNode(e.node);
                 }
+                selectNode(e.node);
+            });
 
-                cy.elements().removeClass('highlighted').removeClass('highlighted-edge');
-                const targetNode = cy.$id(typeName);
-                targetNode.addClass('highlighted');
-                targetNode.connectedEdges().addClass('highlighted-edge');
+            renderer.on('clickEdge', ({ edge }) => {
+                const edgeData = masterEdges.find(e => e.id === edge);
+                if (edgeData) showPathDetails(makeEdgeShim(edgeData));
+            });
 
-                // --- Graph-to-Tree Interaction ---
-                const treeItem = document.querySelector(`.tree-item[data-id="${typeName}"]`);
-                if (treeItem) {
-                    switchTab('schema');
-                    document.querySelectorAll('.tree-item').forEach(i => i.classList.remove('selected'));
-                    treeItem.classList.add('selected');
-                    treeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            renderer.on('enterNode', ({ node }) => {
+                hoveredNode = node;
+                const set = new Set([node]);
+                graph.forEachNeighbor(node, (n) => set.add(n));
+                highlightedNodes = set;
+                renderer.refresh();
+            });
+
+            renderer.on('leaveNode', () => {
+                hoveredNode = null;
+                highlightedNodes = new Set();
+                renderer.refresh();
+            });
+
+            renderer.on('rightClickNode', (e) => {
+                if (e.preventSigmaDefault) e.preventSigmaDefault();
+                if (e.event && e.event.original) e.event.original.preventDefault();
+
+                selectedNodeId = e.node;
+
+                const menu = document.getElementById('ctx-menu');
+                menu.style.display = 'block';
+                const nativeEvt = e.event && e.event.original;
+                if (nativeEvt) {
+                    menu.style.left = nativeEvt.clientX + 'px';
+                    menu.style.top = nativeEvt.clientY + 'px';
                 }
+            });
 
-                if (kind === 'SCALAR' || kind === 'ENUM') {
-                    showNodeQueries(targetNode);
-                } else {
-                    const relevantFindings = findingsData.filter(f => f.affected.some(aff => aff.startsWith(typeName)));
-                    if (relevantFindings.length > 0) {
-                        showDetails(relevantFindings[0].id);
-                    }
+            // Node dragging: reposition on drag. A drag ends with a synthetic clickNode,
+            // so `didDrag` is tracked here and checked in the clickNode handler above to
+            // stop a drag from selecting the node (which would relayout + zoom).
+            renderer.on('downNode', (e) => {
+                didDrag = false;
+                draggedNode = e.node;
+                graph.setNodeAttribute(draggedNode, 'highlighted', true);
+            });
+
+            // Pin the camera's bounding box while dragging so Sigma doesn't rescale
+            // the whole view (auto-fit to content) as the dragged node moves — that
+            // was the "drag flings the viewport" bug.
+            renderer.getMouseCaptor().on('mousedown', () => {
+                if (!renderer.getCustomBBox()) renderer.setCustomBBox(renderer.getBBox());
+            });
+
+            renderer.getMouseCaptor().on('mousemovebody', (e) => {
+                if (!draggedNode) return;
+                didDrag = true;
+                const pos = renderer.viewportToGraph(e);
+                graph.setNodeAttribute(draggedNode, 'x', pos.x);
+                graph.setNodeAttribute(draggedNode, 'y', pos.y);
+                if (e.preventSigmaDefault) e.preventSigmaDefault();
+                if (e.original) {
+                    e.original.preventDefault();
+                    e.original.stopPropagation();
                 }
+            });
+
+            renderer.getMouseCaptor().on('mouseup', () => {
+                if (draggedNode) {
+                    graph.removeNodeAttribute(draggedNode, 'highlighted');
+                }
+                draggedNode = null;
+                renderer.setCustomBBox(null);
+            });
+        }
+
+        // Undo/redo keybindings. Guarded so Ctrl/Cmd+Z doesn't fire while the user is
+        // typing in the search box (or any other text input) on the page.
+        window.addEventListener('keydown', (e) => {
+            const active = document.activeElement;
+            const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+            if (isTyping) return;
+
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+                e.preventDefault();
+                undoGraph();
+            } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+                e.preventDefault();
+                redoGraph();
             }
-            
-            nodeTapStartPos = null;
-            nodeTapStartTime = null;
-        });
-
-        cy.on('tap', 'edge', function(evt){
-            showPathDetails(evt.target);
         });
 
         // --- Seed Value Swapping Logic ---

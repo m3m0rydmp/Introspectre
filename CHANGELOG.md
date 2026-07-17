@@ -2,6 +2,17 @@
 
 All notable changes to Introspectre are summarized here at a high level. For the full command/flag surface, see [USAGE.md](./USAGE.md).
 
+## [1.4.0] - 2026-07-17
+
+### Visual report — WebGL engine
+* The interactive HTML report now renders on a **WebGL** engine (Sigma.js + graphology) instead of the previous canvas renderer, so large schemas stay smooth where they used to lag. The report is still a single self-contained offline file.
+* Graph layout is now organic (ForceAtlas2), which de-clutters large schemas compared to the previous rigid hierarchy.
+* **Progressive expansion**: clicking a node now reveals a capped set of its relations (with a "show more" path via right-click) instead of dumping every connection at once, and only the newly added nodes are laid out rather than reflowing the whole graph.
+* **Hover-to-highlight**: hovering a node now highlights its immediate neighborhood.
+
+### Packaging
+* Added crate metadata (description, license, repository, keywords, categories) so Introspectre can be installed with `cargo install`.
+
 ## [1.3.0] - 2026-07-16
 
 ### Transport

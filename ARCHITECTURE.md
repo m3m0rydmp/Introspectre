@@ -88,12 +88,14 @@ With that framing, each class is delivered as follows:
 
 ## 5. Visual Reporting
 
-The HTML report (built on Cytoscape.js) renders the same field-centric multigraph interactively, and is fully self-contained — the report's JS dependencies are embedded at build time, so the generated file works offline with no external CDN request.
+The HTML report renders the same field-centric multigraph interactively on a **WebGL** engine (Sigma.js for rendering, graphology for the graph model and a ForceAtlas2 layout). WebGL keeps large schemas responsive where a CPU canvas renderer stalls, and the report is fully self-contained — the report's JS dependencies are embedded at build time, so the generated file works offline with no external CDN request.
 
+* **Progressive expansion**: clicking a node reveals a capped set of its relations rather than every connection at once, and lays out only the newly added nodes; right-click offers full expansion. This keeps interaction tractable on large schemas.
 * **Isolate mode**: given a selected node, the report computes the upstream path back to the root and the full downstream closure of reachable terminal fields, hiding everything else.
+* **Hover highlighting**: hovering a node emphasises its immediate neighborhood.
 * **Embedded proofs**: findings surfaced during an active run are attached to their corresponding graph nodes, each with a ready-to-run reproduction query and the payload that triggered it inlined — no separate cross-referencing between report and terminal output required.
 
-A subtlety worth stating explicitly: graph nodes are **deduplicated types**, not fields. A type appears exactly once even when dozens of fields return it, and edges carry the field name. Consequently, expanding a node reveals edges to it from *every* already-visible type that references it — so nodes that are not directly connected to the one you clicked can appear, and because the layout is recomputed over the whole visible graph, existing nodes reposition. Isolate mode's downstream-closure behaviour compounds this deliberately. This is inherent to a type-centric model (it keeps the graph compact by not duplicating shared types); the trade-off is that "expand" is a schema-reachability operation, not a strict direct-neighbour reveal.
+A subtlety worth stating explicitly: graph nodes are **deduplicated types**, not fields. A type appears exactly once even when dozens of fields return it, and edges carry the field name. Consequently, expanding a node reveals edges to it from *every* already-visible type that references it — so nodes that are not directly connected to the one you clicked can appear. Isolate mode's downstream-closure behaviour compounds this deliberately. This is inherent to a type-centric model (it keeps the graph compact by not duplicating shared types); the trade-off is that "expand" is a schema-reachability operation, not a strict direct-neighbour reveal.
 
 ---
 
