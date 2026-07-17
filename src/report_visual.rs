@@ -513,13 +513,14 @@ pub fn write_visual_report(
     let meta_json = serde_json::to_string(meta).unwrap_or_default();
 
     // Vendored graph libraries, inlined so the report renders with no network access.
-    // Load order matters: cytoscape, then dagre, then cytoscape-dagre (the extension
-    // registers itself against both globals).
+    // Load order matters: graphology (the graph data structure), then graphology-library
+    // (layout algorithms like ForceAtlas2, built against the graphology global), then
+    // sigma (the WebGL renderer, which renders a graphology graph instance directly).
     let vendor_js = format!(
         "<script>{}</script>\n<script>{}</script>\n<script>{}</script>",
-        include_str!("vendor/cytoscape.min.js"),
-        include_str!("vendor/dagre.min.js"),
-        include_str!("vendor/cytoscape-dagre.min.js"),
+        include_str!("vendor/graphology.umd.min.js"),
+        include_str!("vendor/graphology-library.min.js"),
+        include_str!("vendor/sigma.min.js"),
     );
 
     let html = include_str!("visual_template.html")

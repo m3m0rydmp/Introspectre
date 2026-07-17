@@ -190,12 +190,14 @@ introspectre audit http://target.com/graphql --only idor
 
 ## 8. Reading the Visual Report
 
-The `--visualize` report renders the schema as an interactive graph. Two things about it surprise people the first time, and both are by design:
+The `--visualize` report renders the schema as an interactive graph. It runs on a **WebGL** engine (Sigma.js + graphology) so it stays responsive on large schemas, and it is a single self-contained file that works offline. A few things about it are worth knowing:
 
 - **Nodes are *types*, not fields.** Each box is a GraphQL type (e.g. `User`, `AddonUser`); the arrows between them are labeled with the field that connects them. A single type appears **once**, even though many fields across the schema return it.
-- **Clicking a node reveals more than its direct neighbors.** Because types are shared, expanding a node draws edges to it from *every* currently-visible type that references it — so nodes that aren't directly connected to the one you clicked can light up. The graph is then re-laid-out as a whole, so existing nodes shift position. In **Isolate Mode**, a click deliberately shows the full path from a root down to the selected node *and* everything reachable downstream of it — useful for tracing how an attacker reaches a sensitive field, but it surfaces many indirect nodes on purpose.
+- **Clicking a node expands it progressively.** Because types are shared, expanding a node draws edges to it from *every* currently-visible type that references it — so nodes that aren't directly connected to the one you clicked can appear. To avoid overwhelming you on a large schema, each click reveals a **capped** set of a node's relations (prioritising higher-risk targets); right-click a node for **Expand all** to reveal the rest. Only the newly added nodes are laid out, so the rest of the graph stays put.
+- **Hover to highlight.** Hovering a node highlights its immediate neighborhood so you can trace connections without clicking.
+- **Isolate Mode.** A click there deliberately shows the full path from a root down to the selected node *and* everything reachable downstream of it — useful for tracing how an attacker reaches a sensitive field, though it surfaces many indirect nodes on purpose.
 
-If a large schema feels cluttered, keep **Scalars: HIDDEN** on, use the search box to jump to a type, and toggle **Isolate Mode** to focus a single path instead of expanding freely.
+If a large schema still feels busy, keep **Scalars: HIDDEN** on, use the search box to jump to (and focus) a type, and use **Isolate Mode** to focus a single path.
 
 ---
 

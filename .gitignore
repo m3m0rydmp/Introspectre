@@ -39,7 +39,6 @@ test.json
 *.db
 introspectre.db
 *-visual.html
-tetest.html
 
 # Sensitive research data
 h1_graphql_data.json
