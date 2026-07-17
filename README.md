@@ -49,7 +49,7 @@ Active probes attempt to *confirm* — not guarantee — the presence of a vulne
 * **Persistence**: learned values are cached locally (SQLite) so probes stay high-fidelity across sessions.
 
 ### Reporting
-* **Self-contained HTML report**: the interactive visual report bundles its own JS (Cytoscape.js and layout extensions) — it renders fully offline with no external CDN dependency.
+* **Self-contained HTML report**: the interactive visual report bundles its own WebGL graph engine (Sigma.js and graphology) — it renders fully offline with no external CDN dependency.
 * **Field-centric graph**: fields are the primary nodes, edges represent traversals, weights represent estimated cost.
 * **Isolate mode & pathfinding**: isolate a single data path, or auto-generate the optimal query path to any field.
 * **Embedded proofs**: findings in the visual report include ready-to-reproduce queries with the triggering payload inlined.
@@ -60,7 +60,7 @@ Active probes attempt to *confirm* — not guarantee — the presence of a vulne
 ## Installation
 
 ### Prerequisites
-Introspectre is built in Rust. You will need the Rust toolchain installed.
+Introspectre is built in Rust. Whether you install from crates.io or build from source, you need the Rust toolchain (`cargo`) installed.
 
 #### Linux / macOS
 ```bash
@@ -70,7 +70,15 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 #### Windows
 Download and run [rustup-init.exe](https://rustup.rs/).
 
+### From crates.io (recommended)
+Install the latest published release with Cargo:
+```bash
+cargo install introspectre
+```
+This builds `introspectre` and installs it into `~/.cargo/bin` (make sure that directory is on your `PATH`). Verify with `introspectre --help`, and upgrade later with `cargo install introspectre --force`.
+
 ### Building from Source
+For the latest unreleased changes, or to hack on Introspectre, build from the repository instead:
 1. Clone the repository:
    ```bash
    git clone https://github.com/m3m0rydmp/Introspectre.git
