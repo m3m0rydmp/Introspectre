@@ -229,7 +229,6 @@ cargo install --git https://github.com/m3m0rydmp/Introspectre
 ```
 
 ---
-
 ## Legal & Ethical Use
 
 Introspectre is intended for **authorized security research, penetration testing, and defensive assessment only**.
