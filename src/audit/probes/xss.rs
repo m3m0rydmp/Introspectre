@@ -17,6 +17,7 @@ pub async fn probe_xss(
     evasion_level: u8,
     config: &AppConfig,
     transport: Transport,
+    ctx: &crate::audit::targets::ScopeCtx<'_>,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -41,6 +42,14 @@ pub async fn probe_xss(
         }
     }
 
+    // Focus / rank by passive severity / cap to --max-targets before probing.
+    let targets = crate::audit::targets::scope_targets(
+        targets,
+        ctx.sev_index,
+        ctx.scope,
+        |t| (t.1.to_string(), t.2.name.clone()),
+    );
+
     let headers = effective_headers(extra_headers, None, false);
     let payloads = [
         "<script>alert(1)</script>",
@@ -48,12 +57,13 @@ pub async fn probe_xss(
         "javascript:alert(1)",
     ];
 
-    for (op_keyword, root_name, field, arg) in targets {
+    'targets: for (op_keyword, root_name, field, arg) in targets {
         let is_mutation = op_keyword == "mutation";
         eprintln!("  {} Testing XSS Injection on {}.{}({})...", "→".cyan(), root_name, field.name, arg.name);
         let mut confirmed_for_arg = false;
 
         for payload in payloads {
+            if !ctx.budget.try_consume() { break 'targets; }
             // Test both Variable-based and Inlined payloads
             // Inlined payloads are often reflected in "Invalid Value" or "Type Mismatch" errors
             let mut overrides = HashMap::new();

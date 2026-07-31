@@ -90,6 +90,8 @@ introspectre audit http://target.com/graphql --batch-probes --batch-size 10
 
 ## 4. Blind Discovery
 
+A common hardening mistake is to disable **only** the `__schema` root field while leaving `__type` reachable. In that case `scan` and `audit` automatically fall back to a **`__type`-walk**: they discover the root type via `__typename`, then walk `__type(name: ...)` breadth-first across every referenced type to rebuild a typed schema — no flag or wordlist needed. This runs on its own when the normal introspection vectors fail; a note (`reconstructed N types via __type-walk`) is printed and the reconstructed schema feeds the full analysis and visual report. It stops only when both `__schema` and `__type` are blocked, at which point `brute` is the next step.
+
 When introspection is blocked and no schema file is available, `brute` reconstructs what it can. It probes candidate field names and, at the same time, harvests GraphQL's "Did you mean 'user'?" style error suggestions — so it recovers fields even without a direct wordlist hit for each one.
 
 ### Case: with a custom wordlist
@@ -166,22 +168,44 @@ introspectre audit http://target.com/graphql --transport form
 
 Active probing — especially the DoS-class checks — can stress a target. Against a small self-hosted lab, an unbounded DoS probe can take down the very server you are testing (a "self-DoS"). These flags let you scope a run precisely.
 
+`audit` also runs a set of **safe, single-request configuration checks** by default — `introspection-matrix` (which of `__schema`/`__type`/"did you mean?" are open, and at what auth level), `cors` (cross-origin `Access-Control-*` reflection), `apq` (Apollo persisted-query support), and `alias-cap` (per-field alias limit). They generate negligible load; skip any with `--skip <id>`.
+
 | Flag | Effect |
 | :--- | :--- |
 | `--no-dos` | Skips every DoS-class probe (alias amplification, batching, complexity, nested-list expansion). Use this for functional/coverage runs where you don't want to generate load. |
 | `--skip <ids>` | Comma-separated probe ids to skip, e.g. `--skip ssrf,xss`. |
 | `--only <ids>` | Run *only* these probe ids, e.g. `--only sql-injection,idor`. |
-| `--dry-run` | Prints the probes that *would* run and sends **no requests at all**. |
+| `--dry-run` | Prints the probes that *would* run, an estimated request count per probe, and a total wall-clock estimate — and sends **no requests at all**. |
+| `--focus <TYPE\|TYPE.field>` | Aim active probing at a subset of root fields — a whole root (`mutation`), a qualified field (`Query.user`), or a name substring (`report`). |
+| `--max-targets <N>` | Cap the targets each fan-out probe tests (`0` = unlimited). |
+| `--max-requests <N>` | Global cap on the total active requests sent. |
 
 ```bash
 # Functional run with no load-generating probes
 introspectre audit http://lab.local/graphql --no-dos
 
-# Preview exactly what a config would do, without touching the target
+# Preview the request volume and time cost before firing anything
 introspectre audit http://lab.local/graphql --dry-run
 
 # Run a single class in isolation
 introspectre audit http://target.com/graphql --only idor
+```
+
+### Large schemas
+
+On a big schema (hundreds of mutations, thousands of fields) the fan-out probes (`unauth`, `mutation-privesc`, `sql-injection`, `os-command-injection`, `xss`) would otherwise send *tens of thousands* of requests — hours of traffic, and a self-DoS risk. Introspectre handles this in four ways:
+
+- **Preflight estimate.** `--dry-run` prints, per probe, roughly how many requests it would send and how long that takes at the current `--rate-limit-ms`, so you see the cost before committing.
+- **Risk-ranked auto-cap.** Without an explicit `--max-targets`, a large schema auto-caps each fan-out probe to a safe number of targets, **ranked by the severity of any passive finding that already touched them** — so the most interesting fields are probed first. A warning tells you it happened.
+- **Scoping.** `--focus User` (or `--focus Query.report`) narrows probing to the part of the schema you care about; `--max-targets N` sets your own per-probe cap (`0` lifts it entirely).
+- **Global budget.** `--max-requests N` bounds the whole run; the audit stops cleanly at the budget and reports what it left untested.
+
+```bash
+# See the damage before doing it
+introspectre audit https://api.big.com/graphql --dry-run
+
+# Probe only user/report surfaces, capped and budgeted
+introspectre audit https://api.big.com/graphql --focus user,report --max-targets 50 --max-requests 2000
 ```
 
 **Building a lab without self-DoS:** run the target in a resource-capped container (e.g. `docker run --cpus 1 --memory 512m …`) so a runaway query can't exhaust the host, use `--no-dos` while you validate the non-DoS coverage, and reach for `--dry-run` to sanity-check a command before firing it. For automated/CI use, prefer a disposable mock GraphQL server over a persistent lab.
@@ -251,6 +275,9 @@ If a large schema still feels busy, keep **Scalars: HIDDEN** on, use the search 
 | `--batch-probes` | `false` | Batch safe probes into fewer HTTP requests. |
 | `--batch-size <N>` | `5` | Max operations per batched request (with `--batch-probes`). |
 | `--idor-payloads <IDS>` | — | Custom possibility IDs for IDOR probing (comma-separated or repeatable). |
+| `--focus <TYPE\|TYPE.field>` | — | Restrict active probing to matching root fields (repeatable / comma-separated). Matches a whole root (`query`/`mutation`), a qualified `Query.user`, or any field whose name contains the term (`user`). |
+| `--max-targets <N>` | auto | Cap the targets each fan-out probe tests. `0` = unlimited. On a large schema the default auto-caps to a safe limit (ranked by passive-finding severity). |
+| `--max-requests <N>` | — | Global cap on total active requests. The audit stops probing once reached and reports what it skipped. `0` = unlimited. |
 
 ### `brute`-specific flags
 

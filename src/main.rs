@@ -8,6 +8,7 @@ mod io_ops;
 mod report;
 mod report_visual;
 mod transport;
+mod type_walk;
 mod types;
 mod utils;
 mod traffic;
@@ -428,6 +429,9 @@ async fn main() {
                 &cli.skip,
                 &cli.only,
                 cli.no_dos,
+                &[], // Scan path: no --focus
+                config.audit.max_targets_per_probe, // config default (auto-cap if None)
+                config.audit.max_total_requests,
                 cli.dry_run,
             )
             .await
@@ -471,6 +475,9 @@ async fn main() {
         batch_probes,
         batch_size,
         idor_payloads,
+        focus,
+        max_targets,
+        max_requests,
     } = &cli.command
     {
         let mut audit_report = match crate::audit::run_audit(
@@ -492,6 +499,9 @@ async fn main() {
             &cli.skip,
             &cli.only,
             cli.no_dos,
+            focus,
+            (*max_targets).or(config.audit.max_targets_per_probe),
+            (*max_requests).or(config.audit.max_total_requests),
             cli.dry_run,
         )
         .await

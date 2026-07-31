@@ -415,3 +415,75 @@ pub fn check_information_exposure(
         });
     }
 }
+
+/// Surfaces enums that encode the application's **role/permission model** (name or values
+/// match the RBAC vocabulary) and lists the disclosed values — the exact privilege
+/// taxonomy an attacker would target for escalation. Distinct from `sensitive-enum-values`,
+/// which matches the generic sensitive-data vocabulary and does not enumerate the model.
+pub fn check_rbac_enums(
+    schema: &GqlSchema,
+    patterns: &PatternConfig,
+    findings: &mut Vec<Finding>,
+) {
+    let types = user_types(schema);
+    let mut hits: Vec<(String, Vec<String>)> = Vec::new();
+    for t in &types {
+        if t.kind.as_deref() != Some("ENUM") {
+            continue;
+        }
+        let name = t.name.as_deref().unwrap_or("");
+        let values: Vec<String> = t
+            .enum_values
+            .as_ref()
+            .map(|vs| vs.iter().map(|v| v.name.clone()).collect())
+            .unwrap_or_default();
+        let name_hit = matches_pattern(name, &patterns.rbac_terms.names);
+        let value_hit = values.iter().any(|v| matches_pattern(v, &patterns.rbac_terms.names));
+        if name_hit || value_hit {
+            hits.push((name.to_string(), values));
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+
+    let preview: String = hits
+        .iter()
+        .take(3)
+        .map(|(n, vs)| {
+            format!(
+                "{} = {{{}}}",
+                n,
+                vs.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let affected = hits
+        .iter()
+        .map(|(n, _)| AffectedLocation::Type(n.clone()))
+        .collect::<Vec<_>>();
+
+    findings.push(Finding {
+        id: "rbac-enum-disclosure",
+        severity: Severity::Low,
+        title: "RBAC / Permission Model Disclosed via Enums",
+        description: format!(
+            "{} enum type(s) expose the application's role/permission model directly in the schema, handing an attacker the exact privilege vocabulary to target for escalation and to reason about authorization gaps. Disclosed: {}.",
+            hits.len(),
+            preview
+        ),
+        affected,
+        remediation: "Keep the internal RBAC model out of the client-facing schema. Prefer opaque capability checks (e.g. `canEditReport: Boolean`) over exposing the full role/permission taxonomy as enums.",
+        first_step: Some("Map each disclosed role/permission value to the mutations and fields it gates, then exercise those with a lower-privileged identity.".into()),
+        references: vec![
+            "CWE-200: Information Exposure",
+            "OWASP API5: Broken Function Level Authorization",
+        ],
+        status: FindingStatus::Inferred,
+        confidence: Confidence::Theoretical,
+        evidence_level: EvidenceLevel::Inferred,
+        poc: None,
+    });
+}

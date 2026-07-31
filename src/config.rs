@@ -102,6 +102,8 @@ pub struct PatternConfig {
     pub cross_domain_hints: PatternNames,
     #[serde(default)]
     pub operation_names: PatternNames,
+    #[serde(default = "default_rbac_terms")]
+    pub rbac_terms: PatternNames,
 }
 
 impl Default for PatternConfig {
@@ -115,6 +117,7 @@ impl Default for PatternConfig {
             user_scope_hints: default_user_scope_hints(),
             cross_domain_hints: default_cross_domain_hints(),
             operation_names: PatternNames::default(),
+            rbac_terms: default_rbac_terms(),
         }
     }
 }
@@ -159,6 +162,14 @@ pub struct AuditConfig {
     pub seeds: HashMap<String, String>,
     #[serde(default)]
     pub custom_payloads: Vec<String>,
+    /// Default per-probe target cap (overridden by `--max-targets`). `None` = auto-cap
+    /// large schemas; `Some(0)` = unlimited.
+    #[serde(default)]
+    pub max_targets_per_probe: Option<usize>,
+    /// Default global request budget (overridden by `--max-requests`). `None`/`Some(0)` =
+    /// unlimited.
+    #[serde(default)]
+    pub max_total_requests: Option<usize>,
 }
 
 impl Default for AuditConfig {
@@ -172,6 +183,8 @@ impl Default for AuditConfig {
             test_alias_dos: true,
             seeds: HashMap::new(),
             custom_payloads: Vec::new(),
+            max_targets_per_probe: None,
+            max_total_requests: None,
         }
     }
 }
@@ -288,6 +301,22 @@ fn default_auth_directives() -> PatternNames {
             "hasRole",
             "permission",
             "authorize",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    }
+}
+
+fn default_rbac_terms() -> PatternNames {
+    // High-precision role/permission vocabulary. Deliberately excludes common words that
+    // appear as tokens outside an RBAC context (scope, access, tier, member, owner, …) to
+    // avoid false positives — `matches_pattern` is token-based, so `scope` would otherwise
+    // hit `structured_scope`.
+    PatternNames {
+        names: vec![
+            "role", "roles", "permission", "permissions", "privilege", "privileges",
+            "superuser", "rbac", "acl", "admin", "isadmin", "is_admin",
         ]
         .into_iter()
         .map(str::to_string)

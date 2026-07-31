@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use colored::Colorize;
 use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
@@ -134,19 +135,36 @@ pub async fn fetch_introspection(
         }
 
         if let Some(data) = parsed.data {
-            // If it's a __type query, we need to wrap it into a GqlSchema structure
-            if query.contains("__type") {
-                 // Try to find the __type field in the raw JSON since IntrospectionData expects __schema
-                 // This is a bit hacky because our types are tuned for __schema
-                 // Let's check if we can reconstruct a minimal schema
-                 // For now, let's just return if we have a proper schema
-            }
-
-            // Normal __schema path
             return Ok(data.schema);
         } else {
             last_error = "Response contained no data.".to_string();
         }
+    }
+
+    // Every `__schema`-based vector failed. Before giving up, try a
+    // `__type`-walk reconstruction: many APIs disable only `__schema` and leave
+    // `__type` reachable, from which the whole schema can be rebuilt one type at
+    // a time. Build a parsed header list mirroring the auth handling above.
+    let mut walk_headers = parse_extra_headers(extra_headers);
+    if let Some(t) = token {
+        walk_headers.push(("Authorization".to_string(), format!("Bearer {}", t)));
+    }
+    if let Ok(schema) = crate::type_walk::reconstruct_via_type_walk(
+        &client,
+        url,
+        &walk_headers,
+        rate_limit_ms,
+        transport,
+        true,
+    )
+    .await
+    {
+        eprintln!(
+            "  {} `__schema` blocked; reconstructed {} types via `__type`-walk (partial schema).",
+            "→".blue(),
+            schema.types.len()
+        );
+        return Ok(schema);
     }
 
     Err(format!(

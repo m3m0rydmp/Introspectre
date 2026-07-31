@@ -1,6 +1,6 @@
 [package]
 name = "introspectre"
-version = "1.4.0"
+version = "1.6.0"
 edition = "2021"
 description = "A GraphQL offensive-security engine: introspection-driven schema analysis, active vulnerability probing, and an interactive attack-surface report."
 license = "MIT"
@@ -11,10 +11,7 @@ keywords = ["graphql", "security", "pentest", "introspection", "offensive-securi
 categories = ["command-line-utilities", "development-tools"]
 exclude = [
     "resources/*",
-    "RESEARCH.md",
-    "PRESENTATION.md",
-    "ITERATION.md",
-    "NOTES-ENTERPRISE.md",
+    "docs/*",
     "*-visual.html",
     "introspectre.db",
 ]

@@ -57,8 +57,10 @@ pub fn analyze(
     };
 
     information_exposure::check_information_exposure(schema, patterns, &mut findings);
+    information_exposure::check_rbac_enums(schema, patterns, &mut findings);
     dos::check_dos(schema, &mut findings);
     access_control::check_access_control(schema, patterns, &mut findings);
+    access_control::check_node_idor(schema, &mut findings);
     jwt::check_jwt(token, patterns, &mut findings);
 
     (findings, stats)

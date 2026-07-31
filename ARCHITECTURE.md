@@ -29,6 +29,8 @@ This model supports two structural analyses used throughout the tool:
 * **Optimal pathfinding**: computing the least-cost (or, for the report's "trace to root" action, the actual) path from an entry point to any field, so a researcher can see exactly how to reach a sensitive node.
 * **Complexity prediction**: walking weighted distances from the root to flag which query paths are disproportionately expensive, informing which paths get prioritized for DoS-related checks.
 
+Note the distinction between this internal *analysis* graph (fields as nodes) and the *visual report*, which renders a **type-deduplicated projection** of it (types as nodes, field names on the edges) to stay compact on large schemas — see [§5](#5-visual-reporting).
+
 Circular type relationships (e.g., `User -> Post -> User`) are detected as cycles in this graph — the same structure that enables unbounded query depth is what the graph traversal flags.
 
 ---
@@ -88,7 +90,7 @@ With that framing, each class is delivered as follows:
 
 ## 5. Visual Reporting
 
-The HTML report renders the same field-centric multigraph interactively on a **WebGL** engine (Sigma.js for rendering, graphology for the graph model and a ForceAtlas2 layout). WebGL keeps large schemas responsive where a CPU canvas renderer stalls, and the report is fully self-contained — the report's JS dependencies are embedded at build time, so the generated file works offline with no external CDN request.
+The HTML report renders a **type-deduplicated projection** of that field-centric analysis graph (see the subtlety at the end of this section), interactively, on a **WebGL** engine (Sigma.js for rendering, graphology for the graph model and a ForceAtlas2 layout). WebGL keeps large schemas responsive where a CPU canvas renderer stalls, and the report is fully self-contained — the report's JS dependencies are embedded at build time, so the generated file works offline with no external CDN request.
 
 * **Progressive expansion**: clicking a node reveals a capped set of its relations rather than every connection at once, and lays out only the newly added nodes; right-click offers full expansion. This keeps interaction tractable on large schemas.
 * **Isolate mode**: given a selected node, the report computes the upstream path back to the root and the full downstream closure of reachable terminal fields, hiding everything else.

@@ -1,11 +1,13 @@
 pub mod probes;
 pub mod utils;
 pub mod poc;
+pub mod targets;
 
 use crate::audit::probes::{
     probe_alias_dos, probe_batching, probe_complexity, probe_idor, probe_ssrf, probe_typename,
     probe_unauth_access, probe_verbose_error_disclosure, probe_sqli, probe_xss, probe_command_injection, probe_mutation_privesc,
     probe_engine_fingerprint, probe_csrf_methods, probe_dos_expansion,
+    probe_introspection_matrix, probe_cors, probe_apq, probe_alias_cap,
 };
 use crate::config::AppConfig;
 use crate::transport::Transport;
@@ -24,6 +26,16 @@ pub struct AuditReport {
 
 /// DoS-class probe ids, gated together by `--no-dos`.
 const DOS_CLASS_PROBE_IDS: &[&str] = &["alias-dos", "batching", "complexity", "dos-expansion"];
+
+/// When no explicit `--max-targets` is given and any fan-out probe would exceed this many
+/// targets, the audit auto-caps each probe to [`DEFAULT_LARGE_SCHEMA_CAP`] (ranked by
+/// passive-finding severity) and warns. Mirrors the visual report's >150-element prompt.
+const LARGE_SCHEMA_TARGET_THRESHOLD: usize = 200;
+const DEFAULT_LARGE_SCHEMA_CAP: usize = 150;
+
+/// Approximate request-per-target multipliers for the fan-out probes, used only by the
+/// `--dry-run` estimator. `sqli` additionally scales with the payload count.
+const SQLI_BASE_PAYLOADS: usize = 17;
 
 /// Whether a probe with the given stable id should run, per `--only`, `--skip`,
 /// and `--no-dos`. Matching is case-insensitive and trims whitespace so
@@ -64,15 +76,22 @@ pub async fn run_audit(
     skip: &[String],
     only: &[String],
     no_dos: bool,
+    focus: &[String],
+    max_targets: Option<usize>,
+    max_requests: Option<usize>,
     dry_run: bool,
 ) -> Result<AuditReport, String> {
     // Every probe this audit could run, paired with whether config already
     // enables it. Used for both the dry-run preview and (combined with
     // `probe_enabled`) the actual gating below.
-    let probe_defs: [(&str, bool); 15] = [
+    let probe_defs: [(&str, bool); 19] = [
         ("typename", true),
         ("fingerprint", true),
         ("csrf", true),
+        ("introspection-matrix", true),
+        ("cors", true),
+        ("apq", true),
+        ("alias-cap", true),
         ("error-disclosure", true),
         ("unauth", config.audit.test_unauth),
         ("idor", config.audit.test_idor),
@@ -87,6 +106,28 @@ pub async fn run_audit(
         ("alias-dos", config.audit.test_alias_dos),
     ];
 
+    // Focus-only view used to size the schema before the cap is resolved.
+    let focus_scope = targets::AuditScope::new(focus, None);
+
+    // Resolve the effective per-probe target cap. An explicit `--max-targets` always wins
+    // (`0` = unlimited); otherwise auto-cap large schemas so a default run can't self-DoS.
+    let (resolved_max_targets, auto_capped) = if let Some(mt) = max_targets {
+        (if mt == 0 { None } else { Some(mt) }, false)
+    } else {
+        let root = targets::count_root_fields(schema, &focus_scope);
+        let inj = if config.audit.test_injection {
+            targets::count_injection_targets(schema, targets::SQLI_LEAF_SCALARS, &focus_scope)
+        } else {
+            0
+        };
+        if root.max(inj) > LARGE_SCHEMA_TARGET_THRESHOLD {
+            (Some(DEFAULT_LARGE_SCHEMA_CAP), true)
+        } else {
+            (None, false)
+        }
+    };
+    let scope = targets::AuditScope::new(focus, resolved_max_targets);
+
     if dry_run {
         println!();
         println!(
@@ -95,22 +136,82 @@ pub async fn run_audit(
             "active audit (dry run)".bright_black()
         );
         println!("  {} {}", "Target:".bright_black(), url.bright_white());
+        if !focus.is_empty() {
+            println!("  {} {}", "Focus:".bright_black(), focus.join(", ").bright_white());
+        }
+        match resolved_max_targets {
+            Some(cap) => println!(
+                "  {} {} per probe{}",
+                "Max targets:".bright_black(),
+                cap.to_string().bright_white(),
+                if auto_capped { " (auto, large schema)".yellow().to_string() } else { String::new() }
+            ),
+            None => println!("  {} {}", "Max targets:".bright_black(), "unlimited".bright_white()),
+        }
         println!();
 
+        // Cap a target count by the resolved per-probe limit (focus can only narrow further).
+        let cap = |n: usize| resolved_max_targets.map(|m| n.min(m)).unwrap_or(n);
+        let sqli_reqs_per = 1 + (SQLI_BASE_PAYLOADS + config.audit.custom_payloads.len()) * 2;
+        let estimate = |id: &str| -> Option<usize> {
+            match id {
+                "unauth" => {
+                    let t = cap(targets::count_root_fields(schema, &scope));
+                    Some(if batch_probes && batch_size > 0 {
+                        t.div_ceil(batch_size as usize)
+                    } else {
+                        t
+                    })
+                }
+                "mutation-privesc" => Some(cap(targets::count_privesc_targets(schema, &scope))),
+                "sql-injection" => {
+                    Some(cap(targets::count_injection_targets(schema, targets::SQLI_LEAF_SCALARS, &scope)) * sqli_reqs_per)
+                }
+                "os-command-injection" => {
+                    Some(cap(targets::count_injection_targets(schema, targets::CMDI_LEAF_SCALARS, &scope)) * 5)
+                }
+                "xss" => Some(cap(targets::count_scalar_arg_targets(schema, &scope)) * 3),
+                _ => None,
+            }
+        };
+
         let mut would_run = 0usize;
+        let mut total_est = 0usize;
         for (id, cfg_enabled) in probe_defs.iter() {
             if *cfg_enabled && probe_enabled(id, only, skip, no_dos) {
-                println!("  {}", format!("[dry-run] would run probe: {}", id).cyan());
                 would_run += 1;
+                match estimate(id) {
+                    Some(n) => {
+                        total_est += n;
+                        println!(
+                            "  {} {}",
+                            format!("[dry-run] {}", id).cyan(),
+                            format!("~{} request(s)", n).bright_white()
+                        );
+                    }
+                    None => {
+                        total_est += 2; // O(1) probes send a handful of fixed requests
+                        println!(
+                            "  {} {}",
+                            format!("[dry-run] {}", id).cyan(),
+                            "bounded (O(1))".bright_black()
+                        );
+                    }
+                }
             }
         }
 
+        let secs = (total_est as u64).saturating_mul(rate_limit_ms) / 1000;
         println!();
         println!(
-            "  {} {} of {} probe(s) would run. No requests were sent.",
+            "  {} {} of {} probe(s) would run, ~{} total request(s) — about {}m {}s at {}ms spacing. No requests were sent.",
             "✓".green().bold(),
             would_run,
-            probe_defs.len()
+            probe_defs.len(),
+            total_est.to_string().bright_white(),
+            secs / 60,
+            secs % 60,
+            rate_limit_ms
         );
 
         return Ok(AuditReport {
@@ -126,6 +227,34 @@ pub async fn run_audit(
     let mut confirmed: Vec<Finding> = Vec::new();
     let mut unconfirmed: Vec<Finding> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+
+    // Scope + request budget shared by the fan-out probes (unauth, mutation-privesc, sqli,
+    // xss, command-injection). Targets are ranked by any passive finding that already
+    // touched them, then filtered by --focus and capped to --max-targets.
+    let sev_index = targets::severity_index(passive_findings);
+    let budget = targets::RequestBudget::new(max_requests);
+    let scope_ctx = targets::ScopeCtx {
+        sev_index: &sev_index,
+        scope: &scope,
+        budget: &budget,
+    };
+
+    if auto_capped {
+        warnings.push(format!(
+            "Large schema: auto-capped each fan-out probe to {} targets (ranked by passive-finding severity). Use --max-targets 0 for no cap, or --focus <Type> to aim the audit.",
+            DEFAULT_LARGE_SCHEMA_CAP
+        ));
+    } else if let Some(cap) = resolved_max_targets {
+        warnings.push(format!("Per-probe target cap: {} (--max-targets).", cap));
+    }
+    if !focus.is_empty() {
+        warnings.push(format!("Focus filter active: {}.", focus.join(", ")));
+    }
+    if let Some(m) = max_requests {
+        if m > 0 {
+            warnings.push(format!("Global request budget: {} request(s) (--max-requests).", m));
+        }
+    }
 
     if batch_probes {
         warnings.push(
@@ -211,6 +340,65 @@ pub async fn run_audit(
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
     }
 
+    // Introspection method matrix (schema-disclosure surface at each auth level)
+    if probe_enabled("introspection-matrix", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_introspection_matrix(
+            url,
+            &client,
+            extra_headers,
+            current_delay,
+            evasion,
+            transport,
+            &mut confirmed,
+            &mut unconfirmed,
+        )
+        .await
+        {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+    }
+
+    // CORS / cross-origin policy
+    if probe_enabled("cors", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_cors(
+            url, &client, extra_headers, current_delay, evasion, transport, &mut confirmed, &mut unconfirmed,
+        )
+        .await
+        {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+    }
+
+    // Automatic Persisted Queries (APQ) support
+    if probe_enabled("apq", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_apq(url, &client, extra_headers, current_delay, &mut confirmed, &mut unconfirmed).await {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+    }
+
+    // Per-field alias cap (anti-amplification control characterisation)
+    if probe_enabled("alias-cap", only, skip, no_dos) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_alias_cap(
+            url, &client, extra_headers, current_delay, evasion, transport, &mut confirmed, &mut unconfirmed,
+        )
+        .await
+        {
+            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+    }
+
     if probe_enabled("error-disclosure", only, skip, no_dos) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
@@ -248,6 +436,7 @@ pub async fn run_audit(
             batch_size,
             &config.audit.seeds,
             transport,
+            &scope_ctx,
             &mut confirmed,
             &mut unconfirmed,
         )
@@ -296,6 +485,7 @@ pub async fn run_audit(
                 evasion,
                 config,
                 transport,
+                &scope_ctx,
                 &mut confirmed,
                 &mut unconfirmed,
             )
@@ -349,6 +539,7 @@ pub async fn run_audit(
                 evasion,
                 config,
                 transport,
+                &scope_ctx,
                 &mut confirmed,
                 &mut unconfirmed,
             )
@@ -372,6 +563,7 @@ pub async fn run_audit(
                 evasion,
                 config,
                 transport,
+                &scope_ctx,
                 &mut confirmed,
                 &mut unconfirmed,
             )
@@ -395,6 +587,7 @@ pub async fn run_audit(
                 evasion,
                 config,
                 transport,
+                &scope_ctx,
                 &mut confirmed,
                 &mut unconfirmed,
             )
@@ -492,6 +685,13 @@ pub async fn run_audit(
             eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+    }
+
+    if budget.was_hit() {
+        warnings.push(format!(
+            "Global request budget ({}) reached — some probe targets were not tested. Raise --max-requests or narrow --focus to cover them.",
+            max_requests.unwrap_or(0)
+        ));
     }
 
     Ok(AuditReport {

@@ -2,7 +2,7 @@
 
 Introspectre is a GraphQL **offensive security engine** built in Rust. It combines static schema analysis with active probing to surface logical flaws, implementation errors, and protocol-level risks in GraphQL APIs.
 
-_Current version: **1.4.0** — see the [Changelog](./CHANGELOG.md)._
+_Current version: **1.6.0** — see the [Changelog](./CHANGELOG.md)._
 
 > [!TIP]
 > **Documentation**
@@ -23,6 +23,7 @@ Designed for security researchers and penetration testers, Introspectre emphasiz
 - [Quickstart](#quickstart)
 - [Command Reference](#command-reference)
 - [Configuration](#configuration)
+- [Publishing to crates.io (maintainers)](#publishing-to-cratesio-maintainers)
 - [Legal & Ethical Use](#legal--ethical-use)
 - [License](#license)
 
@@ -86,7 +87,18 @@ Install the latest published release with Cargo:
 ```bash
 cargo install introspectre
 ```
-This builds `introspectre` and installs it into `~/.cargo/bin` (make sure that directory is on your `PATH`). Verify with `introspectre --help`, and upgrade later with `cargo install introspectre --force`.
+This builds `introspectre` and installs it into `~/.cargo/bin` (make sure that directory is on your `PATH`). Verify with `introspectre --help`.
+
+#### Updating
+To move to a newer published release, re-run the install:
+```bash
+cargo install introspectre
+```
+Recent Cargo upgrades an existing install in place when a newer version is available. If Cargo reports the crate is *already installed*, force a reinstall of the latest version:
+```bash
+cargo install introspectre --force
+```
+Pin a specific release with `cargo install introspectre --version X.Y.Z`. To bulk-update every Cargo-installed binary at once, the optional [`cargo-update`](https://crates.io/crates/cargo-update) plugin adds `cargo install-update -a`. If you [built from source](#building-from-source) instead, update with `git pull` followed by `cargo build --release`.
 
 ### Building from Source
 For the latest unreleased changes, or to hack on Introspectre, build from the repository instead:
@@ -168,9 +180,55 @@ Introspectre loads `config.toml` from the current directory. Configurable parame
 * **Sensitive patterns**: keywords used to flag information exposure.
 * **Audit toggles**: enable/disable specific probes (e.g., `test_injection`, `test_idor`).
 * **Custom payloads**: your own offensive vectors.
+* **Scope limits**: `max_targets_per_probe` / `max_total_requests` defaults (overridden by `--max-targets` / `--max-requests`).
+
+### Auditing large schemas
+On a schema with hundreds of mutations and thousands of fields, active probing can otherwise balloon to tens of thousands of requests. `audit` bounds this: `--dry-run` prints a per-probe request estimate and wall-clock cost; large schemas auto-cap each fan-out probe (ranked by passive-finding severity) unless you set `--max-targets`; and `--focus <Type|Type.field>` plus `--max-requests <N>` let you aim and budget a run. See [USAGE.md](./USAGE.md#large-schemas).
 
 ---
 
+## Documentation
+
+| Doc | What's in it |
+| :-- | :-- |
+| [USAGE.md](./USAGE.md) | Task-oriented CLI guide, safe-testing & large-schema flags, full flag reference. |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Engine internals: analysis graph, passive/active pipeline, visual report. |
+| [CHANGELOG.md](./CHANGELOG.md) | Release history. |
+
+Internal design/research/roadmap notes live in [`docs/`](./docs/README.md) (not shipped with the crate).
+
+---
+
+## Publishing to crates.io (maintainers)
+
+Publishing to [crates.io](https://crates.io) is separate from pushing to GitHub, and it is **irreversible**: the crate name is claimed permanently, and a published version can only be *yanked* (hidden from new dependents), never deleted.
+
+**Prerequisites**
+- A crates.io account (sign in with GitHub) and a crates.io **API token** (Account Settings → API Tokens). This is a crates.io token — a GitHub token does **not** work for `cargo publish`.
+- On Windows, build with the MinGW/GNU toolchain on `PATH` (this repo has no MSVC): `$env:Path = "$env:USERPROFILE\mingw64\bin;$env:Path"`.
+
+**Steps**
+1. Bump `version` in `Cargo.toml` (SemVer) and add matching entries to `CHANGELOG.md` and the version line near the top of this README. The CLI banner reads the crate version automatically.
+2. Verify the package contents — confirm private files are excluded (`docs/*` and `resources/*` are excluded via `Cargo.toml`; the packaged tree should contain `src/**`, `Cargo.toml`, `README.md`, `LICENSE`, and the public root docs):
+   ```bash
+   cargo package --list
+   ```
+3. Dry-run (packages and builds from the packaged tree, uploads nothing):
+   ```bash
+   cargo publish --dry-run
+   ```
+4. Authenticate and publish:
+   ```bash
+   cargo login <your-crates-io-token>
+   cargo publish
+   ```
+
+If a bad version ships, `cargo yank --version X.Y.Z` stops new projects from depending on it (existing users are unaffected). Prefer not to publish at all? Users can install straight from Git without a crates.io release:
+```bash
+cargo install --git https://github.com/m3m0rydmp/Introspectre
+```
+
+---
 ## Legal & Ethical Use
 
 Introspectre is intended for **authorized security research, penetration testing, and defensive assessment only**.

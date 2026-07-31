@@ -74,20 +74,7 @@ pub async fn run_guess(
                     // Parse suggestions from errors
                     let errors: Vec<crate::types::GqlError> = serde_json::from_str(&r.errors_text).unwrap_or_default();
                     for err_obj in errors {
-                        let err = err_obj.message;
-                        if err.contains("Did you mean") {
-                            // Extract suggestions from "Did you mean \"field1\", \"field2\", or \"field3\"?"
-                            let parts: Vec<&str> = err.split("Did you mean").collect();
-                            if parts.len() > 1 {
-                                let suggestion_text = parts[1];
-                                for s in suggestion_text.split(|c| c == '\"' || c == '\'' || c == '`').filter(|s| !s.trim().is_empty() && s.trim() != "," && s.trim() != "or" && !s.contains('?')) {
-                                    let cleaned = s.trim().to_string();
-                                    if !cleaned.is_empty() && cleaned.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                                        suggestions.push(cleaned);
-                                    }
-                                }
-                            }
-                        }
+                        suggestions.extend(crate::utils::parse_did_you_mean(&err_obj.message));
                     }
 
                     if exists {
