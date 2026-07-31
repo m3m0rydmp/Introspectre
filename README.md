@@ -17,6 +17,17 @@ Designed for security researchers and penetration testers, Introspectre emphasiz
 
 ---
 
+## Contents
+- [Key Features](#key-features)
+- [Installation](#installation)
+- [Quickstart](#quickstart)
+- [Command Reference](#command-reference)
+- [Configuration](#configuration)
+- [Legal & Ethical Use](#legal--ethical-use)
+- [License](#license)
+
+---
+
 ## Key Features
 
 ### Discovery & Reconnaissance
@@ -157,33 +168,6 @@ Introspectre loads `config.toml` from the current directory. Configurable parame
 * **Sensitive patterns**: keywords used to flag information exposure.
 * **Audit toggles**: enable/disable specific probes (e.g., `test_injection`, `test_idor`).
 * **Custom payloads**: your own offensive vectors.
-
----
-
-## Roadmap
-
-Directions under consideration for future releases — ideas and contributions welcome.
-
-### AST-based query engine (foundational)
-
-Introspectre currently builds and mutates GraphQL operations as **strings**. Moving to a real GraphQL **Abstract Syntax Tree** — the parsed, structured representation of a document (operations → selection sets → fields → arguments → fragments → directives), via a Rust parser such as [`apollo-parser`/`apollo-compiler`](https://crates.io/crates/apollo-compiler) or [`graphql-parser`](https://crates.io/crates/graphql-parser) — would let the engine construct and transform queries *structurally* rather than by concatenation. That unlocks:
-
-* **Provably-valid evasion** — obfuscate by re-printing the AST (whitespace, alias randomization, fragment inline/extract) with a guarantee the result still parses, replacing today's string-level reformatting.
-* **Accurate cost/depth analysis** — walk the tree to compute real query complexity and depth, sharpening the DoS and complexity-limit probes instead of relying on heuristics.
-* **Fragment-based DoS detection** — identify circular fragments and fragment "bombs" by inspecting the tree.
-* **Robust injection-point discovery** — enumerate every argument and variable, including deeply nested input objects, directly from the AST.
-* **Traffic ingestion** — parse captured operations into a normalized form for replay and de-duplication.
-
-### Other candidates
-
-* Circular-fragment / fragment-bomb DoS probe (completes the DoS taxonomy).
-* Out-of-band (OAST) confirmation for blind SSRF and blind injection via a callback listener.
-* Field-level authorization differential testing (the same field authenticated vs. unauthenticated).
-* Subscription (WebSocket) probing — subscriptions are currently only flagged statically.
-* Stateful, multi-step exploit chaining (e.g. create a resource, then access it as another identity to *confirm* IDOR rather than flag it).
-* Automatic query-cost budget discovery (binary-search the server's real complexity limit).
-* Response-size / memory-based DoS measurement, not only wall-clock timing.
-* SARIF / CI-friendly output for pipeline integration.
 
 ---
 
