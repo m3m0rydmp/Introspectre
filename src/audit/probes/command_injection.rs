@@ -1,4 +1,5 @@
 use colored::Colorize;
+use crate::audit::targets::{build_nested_value, find_injectable_paths};
 use crate::audit::utils::{
     build_operation_query, effective_headers
 };
@@ -17,6 +18,7 @@ pub async fn probe_command_injection(
     evasion_level: u8,
     config: &AppConfig,
     transport: Transport,
+    ctx: &crate::audit::targets::ScopeCtx<'_>,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -30,7 +32,7 @@ pub async fn probe_command_injection(
                 for arg in args {
                     // Skip args with no type info instead of panicking on a partial schema.
                     let Some(arg_type) = arg.arg_type.as_ref() else { continue; };
-                    let paths = find_injectable_paths(schema, arg_type, &arg.name);
+                    let paths = find_injectable_paths(schema, arg_type, &arg.name, crate::audit::targets::CMDI_LEAF_SCALARS);
                     for path in paths {
                         targets.push((op, root.unwrap_or("?"), field, arg, path));
                     }
@@ -38,6 +40,14 @@ pub async fn probe_command_injection(
             }
         }
     }
+
+    // Focus / rank by passive severity / cap to --max-targets before probing.
+    let targets = crate::audit::targets::scope_targets(
+        targets,
+        ctx.sev_index,
+        ctx.scope,
+        |t| (t.1.to_string(), t.2.name.clone()),
+    );
 
     let headers = effective_headers(extra_headers, None, false);
     
@@ -50,10 +60,11 @@ pub async fn probe_command_injection(
         ("&& sleep 5", 5000),
     ];
 
-    for (op, root, field, arg, path) in targets {
+    'targets: for (op, root, field, arg, path) in targets {
         let is_mutation = op == "mutation";
         eprintln!("  {} Testing Command Injection on {}.{}({})...", "→".cyan(), root, field.name, path);
         for (payload, expected_delay_ms) in &payloads {
+            if !ctx.budget.try_consume() { break 'targets; }
             let mut overrides = HashMap::new();
             let payload_val = serde_json::Value::String(payload.to_string());
             overrides.insert(arg.name.clone(), build_nested_value(&path, &arg.name, payload_val));
@@ -96,54 +107,4 @@ pub async fn probe_command_injection(
     }
 
     Ok(())
-}
-
-fn find_injectable_paths(schema: &GqlSchema, arg_type: &crate::types::GqlTypeRef, current_path: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let type_name = arg_type.unwrap_type_name();
-    
-    if let Some(tn) = type_name {
-        if tn == "String" || tn == "ID" {
-            paths.push(current_path.to_string());
-        } else if let Some(gql_type) = schema.find_type(&tn) {
-            if gql_type.kind.as_deref() == Some("INPUT_OBJECT") {
-                if let Some(fields) = &gql_type.input_fields {
-                    for f in fields {
-                        if let Some(ft) = &f.field_type {
-                            let sub_path = format!("{}.{}", current_path, f.name);
-                            paths.extend(find_injectable_paths(schema, ft, &sub_path));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    paths
-}
-
-fn build_nested_value(full_path: &str, arg_name: &str, value: serde_json::Value) -> serde_json::Value {
-    let relative_path = if full_path.starts_with(arg_name) {
-        if full_path.len() > arg_name.len() {
-            &full_path[arg_name.len() + 1..]
-        } else {
-            ""
-        }
-    } else {
-        full_path
-    };
-
-    if relative_path.is_empty() {
-        return value;
-    }
-
-    let parts: Vec<&str> = relative_path.split('.').collect();
-    let mut current = value;
-
-    for &part in parts.iter().rev() {
-        let mut map = serde_json::Map::new();
-        map.insert(part.to_string(), current);
-        current = serde_json::Value::Object(map);
-    }
-
-    current
 }

@@ -16,11 +16,20 @@ pub async fn probe_mutation_privesc(
     evasion_level: u8,
     config: &AppConfig,
     transport: Transport,
+    ctx: &crate::audit::targets::ScopeCtx<'_>,
     _confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
     let mutation_name = schema.mutation_type.as_ref().map(|m| m.name.as_str());
     let mutation_fields = schema.fields_for_type(mutation_name);
+
+    // Focus / rank by passive severity / cap to --max-targets before probing.
+    let mutation_fields = crate::audit::targets::scope_targets(
+        mutation_fields,
+        ctx.sev_index,
+        ctx.scope,
+        |f| ("Mutation".to_string(), f.name.clone()),
+    );
 
     let priv_patterns = [
         "role", "admin", "privilege", "permission", "isAdmin", "is_admin",
@@ -33,7 +42,7 @@ pub async fn probe_mutation_privesc(
         true,
     );
 
-    for field in mutation_fields {
+    'fields: for field in mutation_fields {
         if let Some(args) = &field.args {
             for arg in args {
                 let mut targets = Vec::new();
@@ -77,6 +86,7 @@ pub async fn probe_mutation_privesc(
                         overrides.insert(path.clone(), payload.clone());
                     }
 
+                    if !ctx.budget.try_consume() { break 'fields; }
                     let gql_op = build_operation_query(schema, "mutation", field, &overrides, &config.audit.seeds, false);
                     let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, true).await?;
 

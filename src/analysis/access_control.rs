@@ -1,6 +1,6 @@
 use crate::utils::matches_pattern;
 use crate::config::PatternConfig;
-use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity};
+use crate::types::{AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlField, GqlSchema, Severity};
 
 pub fn check_access_control(
     schema: &GqlSchema,
@@ -216,4 +216,81 @@ pub fn check_access_control(
             poc: None,
         });
     }
+}
+
+/// Detects a Relay-style global object fetcher: a `Node` interface plus a root
+/// `node(id:)` / `nodes(ids:)` field. A single opaque endpoint that returns any object by
+/// its global id is an enumerable BOLA/IDOR surface when those ids are unsigned/predictable
+/// (e.g. base64 of `Type:<int>` or `gid://host/Type/<int>`). Schema-only — the logged-in
+/// vs. logged-out confirmation is left to a manual two-session test.
+pub fn check_node_idor(schema: &GqlSchema, findings: &mut Vec<Finding>) {
+    let query_name = schema.query_type.as_ref().map(|q| q.name.as_str());
+    let query_fields = schema.fields_for_type(query_name);
+
+    let field_has_arg =
+        |f: &GqlField, arg: &str| f.args.as_ref().map(|a| a.iter().any(|x| x.name == arg)).unwrap_or(false);
+
+    let node_field = query_fields
+        .iter()
+        .copied()
+        .find(|f| f.name == "node" && field_has_arg(f, "id"));
+    let nodes_field = query_fields
+        .iter()
+        .copied()
+        .find(|f| f.name == "nodes" && (field_has_arg(f, "ids") || field_has_arg(f, "id")));
+
+    // Without a `node`/`nodes` global fetcher there is no enumerable surface to flag.
+    if node_field.is_none() && nodes_field.is_none() {
+        return;
+    }
+
+    let node_iface = schema.types.iter().find(|t| {
+        t.kind.as_deref() == Some("INTERFACE") && t.name.as_deref() == Some("Node")
+    });
+
+    // The Node interface's `possibleTypes` enumerates every type reachable through `node(id:)`.
+    let impls: Vec<String> = node_iface
+        .and_then(|t| t.possible_types.as_ref())
+        .map(|pts| pts.iter().filter_map(|r| r.name.clone()).collect())
+        .unwrap_or_default();
+
+    let impl_note = if impls.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " The global fetcher can reach {} object type(s) (e.g. {}).",
+            impls.len(),
+            impls.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+        )
+    };
+
+    let mut affected = Vec::new();
+    if node_field.is_some() {
+        affected.push(AffectedLocation::Field("Query".into(), "node".into()));
+    }
+    if nodes_field.is_some() {
+        affected.push(AffectedLocation::Field("Query".into(), "nodes".into()));
+    }
+
+    findings.push(Finding {
+        id: "node-idor-surface",
+        severity: Severity::Medium,
+        title: "Relay Global-Object (node) Fetch Surface",
+        description: format!(
+            "A Relay-style global object fetcher is exposed (a `Node` interface{} plus a root `node(id:)`/`nodes(ids:)` field).{} A single opaque endpoint that returns any object by its global id is an enumerable BOLA/IDOR surface if those ids are unsigned or predictable — base64 of `Type:<int>` or `gid://host/Type/<int>` schemes are directly enumerable.",
+            if node_iface.is_some() { "" } else { " (implicit — no `Node` interface found, but a global fetcher is present)" },
+            impl_note
+        ),
+        affected,
+        remediation: "Ensure `node(id:)` enforces the same object-level authorization as each type-specific resolver, and issue signed/opaque, non-enumerable global ids. Confirm safety by requesting a global id you own while logged out or as a different identity.",
+        first_step: Some("Decode a real global id (usually base64) to reveal its `Type:<int>` scheme, then request an adjacent id via `node(id:)` as a different identity to test ownership enforcement.".into()),
+        references: vec![
+            "OWASP API1: Broken Object Level Authorization",
+            "CWE-639: Authorization Bypass Through User-Controlled Key",
+        ],
+        status: FindingStatus::Inferred,
+        confidence: Confidence::Possible,
+        evidence_level: EvidenceLevel::Inferred,
+        poc: Some("query { node(id: \"<GLOBAL_ID>\") { id __typename } }".into()),
+    });
 }

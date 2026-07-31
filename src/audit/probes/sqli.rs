@@ -1,3 +1,4 @@
+use crate::audit::targets::{build_nested_value, find_injectable_paths};
 use crate::audit::utils::{
     build_operation_query, effective_headers, is_sql_error,
 };
@@ -17,6 +18,7 @@ pub async fn probe_sqli(
     evasion_level: u8,
     config: &AppConfig,
     transport: Transport,
+    ctx: &crate::audit::targets::ScopeCtx<'_>,
     confirmed: &mut Vec<Finding>,
     _unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -30,7 +32,7 @@ pub async fn probe_sqli(
                 for arg in args {
                     if let Some(at) = &arg.arg_type {
                         // Find all injectable paths (including nested fields in InputObjects)
-                        let paths = find_injectable_paths(schema, at, &arg.name);
+                        let paths = find_injectable_paths(schema, at, &arg.name, crate::audit::targets::SQLI_LEAF_SCALARS);
                         for path in paths {
                             targets.push((op, root.unwrap_or("?"), field, arg, path));
                         }
@@ -39,6 +41,14 @@ pub async fn probe_sqli(
             }
         }
     }
+
+    // Focus / rank by passive severity / cap to --max-targets before probing.
+    let targets = crate::audit::targets::scope_targets(
+        targets,
+        ctx.sev_index,
+        ctx.scope,
+        |t| (t.1.to_string(), t.2.name.clone()),
+    );
 
     let headers = effective_headers(extra_headers, None, false);
     
@@ -78,11 +88,12 @@ pub async fn probe_sqli(
         internal_payloads.push((val, cp.clone()));
     }
 
-    for (op, root, field, arg, path) in targets {
+    'targets: for (op, root, field, arg, path) in targets {
         let is_mutation = op == "mutation";
         eprintln!("  {} Testing SQLi/NoSQLi/SSTI Injection on {}.{}({})...", "→".cyan(), root, field.name, path);
 
         // Baseline: Send a dummy value first
+        if !ctx.budget.try_consume() { break 'targets; }
         let dummy_val = serde_json::Value::String("INTROSPECTRE_DUMMY_123".to_string());
         let mut dummy_overrides = HashMap::new();
         dummy_overrides.insert(arg.name.clone(), build_nested_value(&path, &arg.name, dummy_val));
@@ -91,9 +102,10 @@ pub async fn probe_sqli(
 
         for (payload_val, payload_str) in &internal_payloads {
             // 1. Variable-based Test
+            if !ctx.budget.try_consume() { break 'targets; }
             let mut overrides = HashMap::new();
             overrides.insert(arg.name.clone(), build_nested_value(&path, &arg.name, payload_val.clone()));
-            
+
             let gql_op = build_operation_query(schema, op, field, &overrides, &config.audit.seeds, false);
             let resp = crate::audit::utils::post_graphql_ext(client, url, &headers, &gql_op.query, Some(gql_op.variables), rate_limit_ms, evasion_level, transport, is_mutation).await?;
 
@@ -186,10 +198,11 @@ pub async fn probe_sqli(
             }
 
             // 2. Inlined-query Test (Some resolvers fail only when inlined)
+            if !ctx.budget.try_consume() { break 'targets; }
             let mut inlined_overrides = HashMap::new();
             let nested_val = build_nested_value(&path, &arg.name, payload_val.clone());
             inlined_overrides.insert(arg.name.clone(), json_to_graphql(&nested_val));
-            
+
             let inlined_call = crate::audit::utils::build_field_call(schema, field, &inlined_overrides, &config.audit.seeds, false);
             let inlined_query = format!("{} {{ {} }}", op, inlined_call);
 
@@ -244,52 +257,3 @@ fn json_to_graphql(val: &serde_json::Value) -> String {
     }
 }
 
-fn find_injectable_paths(schema: &GqlSchema, arg_type: &crate::types::GqlTypeRef, current_path: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let type_name = arg_type.unwrap_type_name();
-    
-    if let Some(tn) = type_name {
-        if tn == "String" || tn == "ID" || tn == "Int" || tn == "Float" || tn == "Long" {
-            paths.push(current_path.to_string());
-        } else if let Some(gql_type) = schema.find_type(&tn) {
-            if gql_type.kind.as_deref() == Some("INPUT_OBJECT") {
-                if let Some(fields) = &gql_type.input_fields {
-                    for f in fields {
-                        if let Some(ft) = &f.field_type {
-                            let sub_path = format!("{}.{}", current_path, f.name);
-                            paths.extend(find_injectable_paths(schema, ft, &sub_path));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    paths
-}
-
-fn build_nested_value(full_path: &str, arg_name: &str, value: serde_json::Value) -> serde_json::Value {
-    let relative_path = if full_path.starts_with(arg_name) {
-        if full_path.len() > arg_name.len() {
-            &full_path[arg_name.len() + 1..]
-        } else {
-            ""
-        }
-    } else {
-        full_path
-    };
-
-    if relative_path.is_empty() {
-        return value;
-    }
-
-    let parts: Vec<&str> = relative_path.split('.').collect();
-    let mut current = value;
-
-    for &part in parts.iter().rev() {
-        let mut map = serde_json::Map::new();
-        map.insert(part.to_string(), current);
-        current = serde_json::Value::Object(map);
-    }
-
-    current
-}

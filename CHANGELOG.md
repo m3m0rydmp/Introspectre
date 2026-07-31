@@ -2,6 +2,31 @@
 
 All notable changes to Introspectre are summarized here at a high level. For the full command/flag surface, see [USAGE.md](./USAGE.md).
 
+## [1.6.0] - 2026-07-31
+
+### Blind schema reconstruction via `__type`-walk
+* When a target disables **only** the `__schema` root field but leaves `__type` reachable — a common hardening half-measure — `scan` and `audit` now automatically reconstruct the schema instead of giving up. After the normal `__schema` vectors fail, Introspectre discovers the query root via top-level `__typename`, then walks `__type(name: ...)` breadth-first across every referenced type (field return types, argument types, input-object fields, interfaces, and union members) to rebuild a typed schema that feeds the full analysis pipeline and visual report. Previously this case exited with "introspection disabled — try `brute`", losing all typed analysis (`brute` only recovers untyped root-field names).
+* The walk is bounded (max-types cap, visited-set dedup, honours `--rate-limit-ms`) and hardened against servers that cap introspection nesting: each per-type query starts at a modest `ofType` depth and retries once with a shallower selection if the server rejects it. It runs only as a fallback — endpoints with `__schema` enabled are unaffected and incur no extra requests. A note reports how many types were reconstructed; the schema is treated as partial.
+
+## [1.5.0] - 2026-07-27
+
+### New detection coverage
+* **Passive analyzers** (schema-only, no requests):
+  * `node-idor-surface` — flags a Relay-style global object fetcher (a `Node` interface + a root `node(id:)`/`nodes(ids:)` field) and enumerates the object types it can reach. A single opaque endpoint that returns any object by global id is an enumerable BOLA/IDOR surface when those ids are unsigned/predictable.
+  * `rbac-enum-disclosure` — surfaces enums that encode the app's **role/permission model** and lists the disclosed values (the exact privilege taxonomy to target). Distinct from `sensitive-enum-values`; tunable via a `rbac_terms` pattern list in config.
+* **Active probes** (safe, O(1); default on, skippable via `--skip`):
+  * `introspection-matrix` — reports which of `__schema` / `__type` / field-suggestion ("did you mean?") leakage are reachable, and — when a token is supplied — whether they are open **unauthenticated** vs. only with auth. Unauthenticated schema disclosure on an auth-gated API is called out specifically (disabling only `__schema` is insufficient).
+  * `cors-misconfiguration` — sends a hostile `Origin` and inspects the reflected `Access-Control-Allow-Origin` / `-Allow-Credentials`; reflected-origin + credentials is flagged High (cross-origin authenticated-read primitive).
+  * `apq-supported` — detects Apollo Automatic Persisted Queries (extra cache/registration surface).
+  * `alias-cap-enforced` — characterises the per-selection-set alias cap (an anti-amplification control), reporting the limit when present.
+
+### Audit — large-schema handling
+* Active probing is now bounded on large schemas. The fan-out probes (`unauth`, `mutation-privesc`, `sql-injection`, `os-command-injection`, `xss`) previously enumerated their entire target set — on a schema with hundreds of mutations that meant tens of thousands of requests and hours of traffic. New controls:
+  * **`--dry-run` now estimates request volume** per probe and total wall-clock time, instead of only listing which probes would run.
+  * **Risk-ranked auto-cap**: without an explicit `--max-targets`, a large schema auto-caps each fan-out probe to a safe number of targets, ranked by the severity of any passive finding that already touched them (highest-value fields first). A warning reports it.
+  * **`--focus <TYPE|TYPE.field>`** scopes probing to matching root fields; **`--max-targets <N>`** sets a per-probe cap (`0` = unlimited); **`--max-requests <N>`** is a global request budget that stops the run cleanly and reports what it skipped. Defaults can also be set via `max_targets_per_probe` / `max_total_requests` in config.
+* Fixed a latent stack overflow: the injection probes' input-object path walk (`find_injectable_paths`) had no cycle guard and recursed infinitely on self-referential input types (e.g. recursive filter inputs). It now uses a visited-type set plus a depth cap.
+
 ## [1.4.0] - 2026-07-17
 
 ### Visual report — WebGL engine

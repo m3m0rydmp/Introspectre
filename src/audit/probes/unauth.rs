@@ -18,6 +18,7 @@ pub async fn probe_unauth_access(
     batch_size: u32,
     seed_map: &HashMap<String, String>,
     transport: Transport,
+    ctx: &crate::audit::targets::ScopeCtx<'_>,
     confirmed: &mut Vec<Finding>,
     unconfirmed: &mut Vec<Finding>,
 ) -> Result<(), String> {
@@ -38,6 +39,14 @@ pub async fn probe_unauth_access(
         targets.push(("mutation", "Mutation", f));
     }
 
+    // Focus / rank by passive severity / cap to --max-targets before probing.
+    let targets = crate::audit::targets::scope_targets(
+        targets,
+        ctx.sev_index,
+        ctx.scope,
+        |t| (t.1.to_string(), t.2.name.clone()),
+    );
+
     let headers = effective_headers(extra_headers, None, false);
 
     if batch_probes && batch_size > 0 {
@@ -50,6 +59,7 @@ pub async fn probe_unauth_access(
             query_batch.push((gql_op, op, root, field));
 
             if query_batch.len() >= batch_size_usize {
+                if !ctx.budget.try_consume() { break; }
                 let batch_ops: Vec<GqlOperation> = query_batch.iter().map(|(o, _, _, _)| o.clone()).collect();
                 let responses = crate::audit::utils::post_batched_graphql_ext(client, url, &headers, &batch_ops, rate_limit_ms, evasion_level, transport).await?;
 
@@ -71,7 +81,7 @@ pub async fn probe_unauth_access(
             }
         }
 
-        if !query_batch.is_empty() {
+        if !query_batch.is_empty() && ctx.budget.try_consume() {
             let batch_ops: Vec<GqlOperation> = query_batch.iter().map(|(o, _, _, _)| o.clone()).collect();
             let responses = crate::audit::utils::post_batched_graphql_ext(client, url, &headers, &batch_ops, rate_limit_ms, evasion_level, transport).await?;
 
@@ -92,6 +102,7 @@ pub async fn probe_unauth_access(
         }
     } else {
         for (op, root, field) in targets {
+            if !ctx.budget.try_consume() { break; }
             attempted += 1;
             let gql_op = build_operation_query(schema, op, field, &HashMap::new(), seed_map, false);
             let is_mutation = op == "mutation";

@@ -13,6 +13,10 @@ pub mod mutation_privesc;
 pub mod fingerprint;
 pub mod csrf;
 pub mod dos_expansion;
+pub mod introspection_matrix;
+pub mod cors;
+pub mod apq;
+pub mod alias_cap;
 
 pub use alias_dos::probe_alias_dos;
 pub use batching::probe_batching;
@@ -29,3 +33,7 @@ pub use mutation_privesc::probe_mutation_privesc;
 pub use fingerprint::probe_engine_fingerprint;
 pub use csrf::probe_csrf_methods;
 pub use dos_expansion::probe_dos_expansion;
+pub use introspection_matrix::probe_introspection_matrix;
+pub use cors::probe_cors;
+pub use apq::probe_apq;
+pub use alias_cap::probe_alias_cap;

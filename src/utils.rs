@@ -1,5 +1,46 @@
 use crate::types::{GqlSchema, GqlType};
 
+/// Extract field-name suggestions from a GraphQL `Did you mean "x", "y", or "z"?` error
+/// message. Returns the identifiers only (empty if the message carries no suggestion).
+/// Shared by blind field discovery (`guess.rs`) and the introspection-matrix probe.
+pub fn parse_did_you_mean(message: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let parts: Vec<&str> = message.split("Did you mean").collect();
+    if parts.len() < 2 {
+        return out;
+    }
+    for s in parts[1].split(|c| c == '"' || c == '\'' || c == '`').filter(|s| {
+        let t = s.trim();
+        !t.is_empty() && t != "," && t != "or" && !t.contains('?')
+    }) {
+        let cleaned = s.trim().to_string();
+        if !cleaned.is_empty() && cleaned.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            out.push(cleaned);
+        }
+    }
+    out
+}
+
+/// Parse a server's per-selection-set alias cap from an "aliased too many times" error,
+/// returning the maximum allowed alias count if the message states one. Used to characterise
+/// the endpoint's anti-amplification control.
+pub fn parse_alias_cap(message: &str) -> Option<u32> {
+    let lower = message.to_lowercase();
+    if !(lower.contains("aliased too many times") || lower.contains("too many aliases")) {
+        return None;
+    }
+    // First integer in the message (e.g. "Maximum allowed is 3.").
+    let mut num = String::new();
+    for c in message.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else if !num.is_empty() {
+            break;
+        }
+    }
+    num.parse().ok()
+}
+
 /// Split an identifier into lowercase word segments, breaking on non-alphanumeric
 /// separators and camelCase / acronym boundaries.
 /// e.g. "userEmail" -> ["user","email"], "wallet_id" -> ["wallet","id"],
@@ -149,4 +190,32 @@ pub fn synthesize_value(field_name: &str, type_name: &str) -> String {
     if field_lower.starts_with("is_") || field_lower.starts_with("has_") || field_lower.starts_with("can_") { return "false".to_string(); }
     
     "null".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_alias_cap, parse_did_you_mean};
+
+    #[test]
+    fn did_you_mean_parsing() {
+        let msg = "Cannot query field \"usr\" on type \"Query\". Did you mean \"user\", \"users\", or \"user_id\"?";
+        assert_eq!(parse_did_you_mean(msg), vec!["user", "users", "user_id"]);
+
+        // Single suggestion, backtick style.
+        let msg2 = "Did you mean `me`?";
+        assert_eq!(parse_did_you_mean(msg2), vec!["me"]);
+
+        // No suggestion at all.
+        assert!(parse_did_you_mean("Cannot query field \"x\".").is_empty());
+    }
+
+    #[test]
+    fn alias_cap_parsing() {
+        assert_eq!(
+            parse_alias_cap("Field \"__typename\" has been aliased too many times. Maximum allowed is 3."),
+            Some(3)
+        );
+        assert_eq!(parse_alias_cap("too many aliases (limit 10)"), Some(10));
+        assert_eq!(parse_alias_cap("Cannot query field \"x\"."), None);
+    }
 }

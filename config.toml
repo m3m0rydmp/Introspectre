@@ -32,3 +32,8 @@ test_unauth = true
 test_idor = true
 test_injection = true # Disabled by default for safety. Set to true to enable SQLi/XSS/SSRF probes.
 
+# Large-schema scope limits (overridden by --max-targets / --max-requests).
+# Leave unset to auto-cap large schemas; set to 0 for unlimited.
+# max_targets_per_probe = 150
+# max_total_requests = 5000
+

@@ -169,6 +169,21 @@ pub enum Commands {
         /// Custom possibility IDs for IDOR probing (comma-separated or repeatable)
         #[arg(long, value_delimiter = ',')]
         idor_payloads: Vec<String>,
+
+        /// Restrict active probing to these types or root fields (repeatable / comma-separated).
+        /// Match a whole type ("User") or a specific root field ("Query.user").
+        #[arg(long, value_delimiter = ',')]
+        focus: Vec<String>,
+
+        /// Cap the number of targets each fan-out probe tests (0 = unlimited).
+        /// Large schemas auto-cap to a safe default unless this is set.
+        #[arg(long)]
+        max_targets: Option<usize>,
+
+        /// Global cap on the total number of active requests the fan-out probes may send
+        /// (0 = unlimited). The audit stops probing once the budget is reached.
+        #[arg(long)]
+        max_requests: Option<usize>,
     },
 
     /// Brute-force schema reconstruction when introspection is fully disabled
