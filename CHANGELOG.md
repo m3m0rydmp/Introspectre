@@ -2,6 +2,15 @@
 
 All notable changes to Introspectre are summarized here at a high level. For the full command/flag surface, see [USAGE.md](./USAGE.md).
 
+## [1.13.5] - 2026-08-04
+
+### Docs: quick-start cheat-sheet
+* Added a copy-paste **TL;DR command cheat-sheet** to the top of `USAGE.md`, grouped by scenario
+  (recon, blind discovery, active audit, WAF/bot-wall session reuse, offline & maintenance) — the most
+  useful situational flag combinations in one place, for readers who skip the prose.
+* Documented the `--injection` and `--chain` audit flags in the `USAGE.md` flag table (previously only
+  in `--help`), and corrected the stale current-version line in `README.md`.
+
 ## [1.13.4] - 2026-08-03
 
 ### Visualizer performance: level-of-detail + chunked expand-all

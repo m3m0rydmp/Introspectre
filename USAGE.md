@@ -4,6 +4,65 @@ This is the detailed, case-by-case guide to running Introspectre. For what the t
 
 ---
 
+## TL;DR — command cheat-sheet
+
+Don't want to read the whole guide? Copy, paste, go. `URL` = your GraphQL endpoint (e.g. `https://api.example.com/graphql`).
+
+**Recon (safe — passive by default)**
+```bash
+introspectre scan URL                                    # passive: schema + analysis, no attacks
+introspectre scan URL --visualize                        # + open the WebGL attack-surface graph (Ctrl+C to stop)
+introspectre scan URL -H "Authorization=Bearer <TOKEN>"  # authenticated introspection
+introspectre scan URL --use-schema ./schema.json         # introspection off? analyze a saved schema
+introspectre scan URL --static-only false                # passive AND active probes in one run
+introspectre scan URL --format json                      # machine-readable output (also: markdown)
+introspectre scan URL --purge-cache                      # force a fresh fetch (ignore this target's cache)
+```
+
+**Blind discovery (introspection disabled)**
+```bash
+introspectre brute URL                                   # rebuild schema: field probing + "did you mean?" harvest
+introspectre brute URL -w ./fields.txt                   # with your own wordlist
+introspectre brute URL -c 5 --rate-limit-ms 200          # tune concurrency / pacing
+```
+
+**Active audit (sends payloads — authorized targets only)**
+```bash
+introspectre audit URL                                   # standard active assessment
+introspectre audit URL --no-dos                          # skip all DoS-class probes (gentler)
+introspectre audit URL -H "Authorization=Bearer <TOKEN>" # authenticated (unlocks IDOR/BOLA)
+introspectre audit URL --seeds ./seeds.json              # supply real values to reach auth-gated sinks
+introspectre audit URL --seed-traffic ./session.har      # learn session cookies + values from captured traffic
+introspectre audit URL --focus Query.user,Mutation       # restrict probing to specific fields
+introspectre audit URL --only sql-injection,xss          # run only these probes
+introspectre audit URL --skip complexity,batching        # run everything except these
+introspectre audit URL --chain                           # auto-chain: SQLi -> steal creds -> deeper (aggressive)
+introspectre audit URL --evasion 2                       # obfuscate queries for naive-WAF resilience testing
+introspectre audit URL --max-requests 500 --max-targets 50  # cap the blast radius
+introspectre audit URL --dry-run                         # preview what WOULD be sent, send nothing
+introspectre audit URL --min-severity high               # only surface High findings
+introspectre audit URL --exit-zero                       # don't fail the shell/CI even if vulns are found
+```
+
+**Behind a WAF / bot wall (reuse a real browser session)**
+```bash
+introspectre scan URL --cookie "_px3=...; cf_clearance=..."    # paste challenge-passed cookies
+introspectre scan URL --seed-traffic ./session.har --stealth  # replay captured session + browser headers
+introspectre scan URL --transport get                         # try an alternate transport if POST is blocked
+```
+
+**Offline & maintenance**
+```bash
+introspectre file ./schema.json                          # analyze a saved introspection JSON (no requests)
+introspectre file ./schema.json --visualize              # ...and explore it in the graph
+introspectre --purge-db                                  # wipe the whole local cache DB (asks for typed 'yes')
+introspectre config set audit.max_type_walk_types 5000   # raise the __type-walk reconstruction cap
+```
+
+Full case-by-case detail is below. New here? The three commands you'll use most are `scan`, `audit`, and `brute`.
+
+---
+
 ## 1. Core Workflow
 
 | Command | Role |
@@ -384,6 +443,8 @@ If a large schema still feels busy, keep **Scalars: hidden** on, use the search 
 | `--rate-limit-ms <MS>` | `750` | Delay before each request. |
 | `--dynamic-throttling` | `false` | Adjust delay based on observed server latency. |
 | `--evasion <0-3>` | `0` | Query obfuscation level for WAF-resilience testing. |
+| `--injection` | `false` | Enable the injection-class probes (SQL/NoSQL injection, OS command injection, SSRF, XSS). Also auto-enabled when `--only` names an injection probe. |
+| `--chain` | `false` | Auto-chain: on a confirmed SQL injection, attempt to extract credentials and feed them into later probes to reach auth-gated sinks. Aggressive (exfiltrates data); implies `--injection`. |
 | `--batch-probes` | `false` | Batch safe probes into fewer HTTP requests. |
 | `--batch-size <N>` | `5` | Max operations per batched request (with `--batch-probes`). |
 | `--idor-payloads <IDS>` | — | Custom possibility IDs for IDOR probing (comma-separated or repeatable). |

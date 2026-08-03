@@ -1,6 +1,6 @@
 [package]
 name = "introspectre"
-version = "1.13.4"
+version = "1.13.5"
 edition = "2021"
 description = "A GraphQL offensive-security tool: introspection-driven schema analysis, active vulnerability probing, and an interactive attack-surface report."
 license = "MIT"
