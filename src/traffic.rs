@@ -1,7 +1,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -24,8 +25,16 @@ struct HarEntry {
 struct HarRequest {
     method: Option<String>,
     url: Option<String>,
+    #[serde(default)]
+    headers: Option<Vec<HarHeader>>,
     #[serde(rename = "postData")]
     post_data: Option<HarPostData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarHeader {
+    name: String,
+    value: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,20 +81,131 @@ pub struct TrafficSeed {
     pub source: String,
 }
 
+/// A parsed traffic capture (either supported format).
+enum TrafficDoc {
+    Har(HarRoot),
+    Burp(BurpRoot),
+}
+
+/// Parse a traffic file **streaming from a buffered reader**, so the whole file is not held as a
+/// `String` in addition to the parsed structure — a meaningful peak-memory reduction on large HAR /
+/// Burp exports. HAR (JSON) is tried first, then a Burp Suite "Save items" XML export. (The parsed
+/// structure is still materialised; a full zero-DOM event stream is a possible further step.)
+fn load_traffic(path: &Path) -> Option<TrafficDoc> {
+    if let Ok(file) = File::open(path) {
+        if let Ok(har) = serde_json::from_reader::<_, HarRoot>(BufReader::new(file)) {
+            return Some(TrafficDoc::Har(har));
+        }
+    }
+    if let Ok(file) = File::open(path) {
+        if let Ok(burp) = quick_xml::de::from_reader::<_, BurpRoot>(BufReader::new(file)) {
+            return Some(TrafficDoc::Burp(burp));
+        }
+    }
+    None
+}
+
 pub fn parse_traffic_file(path: &Path) -> Result<Vec<TrafficSeed>, String> {
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    match load_traffic(path) {
+        Some(TrafficDoc::Har(har)) => Ok(extract_from_har(har)),
+        Some(TrafficDoc::Burp(burp)) => Ok(extract_from_burp(burp)),
+        None => Err("Unsupported traffic file format. Supported formats: HAR (.har JSON export) and Burp Suite \"Save items\" XML export.".to_string()),
+    }
+}
 
-    // Check if it's HAR (JSON) first.
-    if let Ok(har) = serde_json::from_str::<HarRoot>(&content) {
-        return Ok(extract_from_har(har));
+/// A request header worth replaying to re-use a captured browser session:
+/// cookies, bearer/authorization, and custom `x-*` auth/session headers.
+fn wanted_session_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "cookie" || n == "authorization" || n.starts_with("x-")
+}
+
+/// Extract the host (`host[:port]`) from a URL without a URL-crate dependency.
+fn host_of(url: &str) -> String {
+    match url.split_once("://") {
+        Some((_, tail)) => tail.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase(),
+        None => String::new(),
+    }
+}
+
+/// Extract session/auth request headers (Cookie, Authorization, `x-*`) from a
+/// captured HAR/Burp file, restricted to entries whose host matches the target
+/// endpoint. Returned as `key=value` strings ready for the `--header` pipeline.
+/// Later entries win on a name conflict, and GraphQL-looking requests are
+/// preferred (scanned last). Empty vec if the file can't be parsed or matched.
+pub fn extract_session_headers(path: &Path, target_url: &str) -> Vec<String> {
+    let Some(doc) = load_traffic(path) else {
+        return vec![];
+    };
+    let target_host = host_of(target_url);
+    if target_host.is_empty() {
+        return vec![];
     }
 
-    // Fall back to a Burp Suite "Save items" XML export.
-    if let Ok(burp) = quick_xml::de::from_str::<BurpRoot>(&content) {
-        return Ok(extract_from_burp(burp));
+    // name(lowercased) -> "Name: preserved" value, so we can dedupe by name but
+    // emit the original header name.
+    let mut chosen: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    let mut consider = |name: &str, value: &str| {
+        if wanted_session_header(name) && !value.trim().is_empty() {
+            chosen.insert(name.to_ascii_lowercase(), (name.to_string(), value.to_string()));
+        }
+    };
+
+    if let TrafficDoc::Har(har) = &doc {
+        // Non-graphql entries first, graphql-looking ones last, so the latter win.
+        let mut entries: Vec<&HarEntry> = har.log.entries.iter().collect();
+        entries.sort_by_key(|e| {
+            let u = e.request.url.clone().unwrap_or_default().to_ascii_lowercase();
+            u.contains("graphql") // false(0) sorts before true(1)
+        });
+        for entry in entries {
+            let url = entry.request.url.clone().unwrap_or_default();
+            if host_of(&url) != target_host {
+                continue;
+            }
+            if let Some(hs) = &entry.request.headers {
+                for h in hs {
+                    consider(&h.name, &h.value);
+                }
+            }
+        }
+    } else if let TrafficDoc::Burp(burp) = &doc {
+        for item in &burp.item {
+            let item_url = item.url.clone().unwrap_or_default();
+            let Some(request) = &item.request else { continue; };
+            let raw_text = request.text.clone().unwrap_or_default();
+            let raw = match request.base64.as_deref() {
+                Some("true") => String::from_utf8_lossy(&STANDARD.decode(raw_text.trim()).unwrap_or_default()).to_string(),
+                _ => raw_text,
+            };
+            let normalized = raw.replace("\r\n", "\n");
+            let head = normalized.splitn(2, "\n\n").next().unwrap_or("");
+            let mut lines = head.lines();
+            let _request_line = lines.next();
+            let mut host = host_of(&item_url);
+            let mut pending: Vec<(String, String)> = Vec::new();
+            for line in lines {
+                if let Some((k, v)) = line.split_once(':') {
+                    let (k, v) = (k.trim(), v.trim());
+                    if k.eq_ignore_ascii_case("host") && host.is_empty() {
+                        host = v.to_ascii_lowercase();
+                    }
+                    pending.push((k.to_string(), v.to_string()));
+                }
+            }
+            if host != target_host {
+                continue;
+            }
+            for (k, v) in pending {
+                consider(&k, &v);
+            }
+        }
     }
 
-    Err("Unsupported traffic file format. Supported formats: HAR (.har JSON export) and Burp Suite \"Save items\" XML export.".to_string())
+    chosen
+        .into_values()
+        .map(|(name, value)| format!("{}={}", name, value))
+        .collect()
 }
 
 fn extract_from_har(har: HarRoot) -> Vec<TrafficSeed> {
@@ -252,4 +372,57 @@ fn extract_query_param(qs: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp_har() -> std::path::PathBuf {
+        let har = r#"{ "log": { "entries": [
+          { "request": { "method": "GET", "url": "https://api.example.com/assets/app.js",
+              "headers": [ { "name": "Cookie", "value": "noise=1" } ] },
+            "response": { "status": 200 } },
+          { "request": { "method": "POST", "url": "https://api.example.com/graphql",
+              "headers": [
+                { "name": "Cookie", "value": "_px3=sess; __cf_bm=abc" },
+                { "name": "Authorization", "value": "Bearer T0KEN" },
+                { "name": "x-api-key", "value": "K123" },
+                { "name": "Accept", "value": "application/json" } ],
+              "postData": { "mimeType": "application/json", "text": "{\"query\":\"{me}\"}" } },
+            "response": { "status": 200 } },
+          { "request": { "method": "POST", "url": "https://other.example.org/graphql",
+              "headers": [ { "name": "Cookie", "value": "SHOULD_NOT=leak" } ] },
+            "response": { "status": 200 } }
+        ] } }"#;
+        let mut p = std::env::temp_dir();
+        p.push(format!("introspectre_test_{}.har", std::process::id()));
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(har.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn session_headers_match_target_host_and_pick_auth_cookies() {
+        let p = tmp_har();
+        let mut hs = extract_session_headers(&p, "https://api.example.com/graphql");
+        hs.sort();
+        let _ = std::fs::remove_file(&p);
+
+        // Cookie must be the graphql entry's (last-wins), not the asset entry's.
+        assert!(hs.iter().any(|h| h == "Cookie=_px3=sess; __cf_bm=abc"), "got {:?}", hs);
+        assert!(hs.iter().any(|h| h == "Authorization=Bearer T0KEN"));
+        assert!(hs.iter().any(|h| h == "x-api-key=K123"));
+        // Non-session headers dropped; other-host cookies never leak.
+        assert!(!hs.iter().any(|h| h.starts_with("Accept=")));
+        assert!(!hs.iter().any(|h| h.contains("SHOULD_NOT")));
+    }
+
+    #[test]
+    fn session_headers_empty_for_unparseable_or_hostless() {
+        let p = tmp_har();
+        assert!(extract_session_headers(&p, "not-a-url").is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
 }

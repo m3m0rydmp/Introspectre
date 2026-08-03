@@ -30,7 +30,8 @@ COMMANDS.md
 instructions.md
 instructions2.md
 CODE_REVIEW.md
-docs/ITERATION.md
+# docs/ITERATION.md — now TRACKED in the private repo (technical journal). Still
+# excluded from the public repo via the curated docs/ overlay + cleanliness grep.
 
 # Test files
 test.json

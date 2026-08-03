@@ -136,7 +136,9 @@ pub fn print_text_report(
     println!(
         "  {} {}",
         "Mode:  ".bright_black(),
-        if meta.offline {
+        if meta.reconstructed {
+            "Blind reconstruction (brute)".yellow()
+        } else if meta.offline {
             "Offline static analysis".yellow()
         } else if meta.static_only {
             "Live scan (safe static strategy)".green()
@@ -144,6 +146,9 @@ pub fn print_text_report(
             "Live scan (active probes enabled)".yellow()
         }
     );
+    if let Some(fp) = &meta.server_fingerprint {
+        println!("  {} {}", "Server:".bright_black(), fp.label().bright_white());
+    }
 
     println!();
     println!("  {}", "Schema Overview".bold().white());
@@ -277,6 +282,15 @@ pub fn print_text_report(
                     println!("        {}", line.bright_white());
                 }
             }
+
+            // sqlmap exploitation hand-off for confirmed injections. Printed
+            // line-by-line (NOT wrapped) so the command stays copy-pasteable.
+            if let Some(guide) = crate::audit::poc::sqlmap_guide(f, &meta.source) {
+                println!("      {}", "Exploit (sqlmap):".bright_black());
+                for line in guide.lines() {
+                    println!("        {}", line.green());
+                }
+            }
         }
 
         println!();
@@ -300,6 +314,7 @@ pub fn print_json_report(_schema: &crate::types::GqlSchema, stats: &SchemaStats,
                 "confidence": f.confidence,
                 "evidence_level": f.evidence_level,
                 "poc": f.poc,
+                "exploit_guide": crate::audit::poc::sqlmap_guide(f, &meta.source),
                 "query_reference": query_reference_for_finding(f),
             })
         })
@@ -307,6 +322,7 @@ pub fn print_json_report(_schema: &crate::types::GqlSchema, stats: &SchemaStats,
 
     let output = serde_json::json!({
         "source": meta.source,
+        "server_fingerprint": meta.server_fingerprint,
         "analysis_mode": {
             "offline": meta.offline,
             "static_only_recommendation": meta.static_only,
@@ -337,6 +353,9 @@ pub fn print_markdown_report(
 ) {
     println!("# GraphQL Security Analyzer Report\n");
     println!("- Source: {}", meta.source);
+    if let Some(fp) = &meta.server_fingerprint {
+        println!("- Server framework: {}", fp.label());
+    }
     println!("- Mode: {}", if meta.offline { "offline" } else { "live" });
     println!("- Findings: {}\n", findings.len());
 
@@ -380,6 +399,11 @@ pub fn print_markdown_report(
             } else {
                 println!("```graphql\n{}\n```\n", poc);
             }
+        }
+
+        if let Some(guide) = crate::audit::poc::sqlmap_guide(f, &meta.source) {
+            println!("### Exploit with sqlmap\n");
+            println!("```bash\n{}\n```\n", guide);
         }
 
         println!("### Remediation\n");

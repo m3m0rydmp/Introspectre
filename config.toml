@@ -37,3 +37,8 @@ test_injection = true # Disabled by default for safety. Set to true to enable SQ
 # max_targets_per_probe = 150
 # max_total_requests = 5000
 
+# Safety cap on how many types the __type-walk fallback reconstructs when
+# __schema is disabled. Raise it if a large schema is truncated (0 = unlimited).
+# Set with: introspectre config set audit.max_type_walk_types 5000
+max_type_walk_types = 0
+

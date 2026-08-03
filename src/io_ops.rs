@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use colored::Colorize;
 use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -12,6 +14,7 @@ use crate::types::{
     AuthDiscoveryResult, GqlError, GqlField, GqlSchema, IntrospectionResponse, INTROSPECTION_QUERY,
 };
 use crate::utils::parse_extra_headers;
+use crate::waf::detect_bot_wall;
 
 #[derive(Debug, Clone)]
 pub struct EndpointProbeResult {
@@ -19,6 +22,47 @@ pub struct EndpointProbeResult {
     pub http_status: u16,
     pub summary: String,
     pub resolved_transport: Transport,
+}
+
+/// Why introspection could not produce a schema — distinguishes a bot-management
+/// wall (which `brute`/`__type`-walk cannot get past either) from a genuinely
+/// disabled/blocked introspection surface, so the caller can advise accurately.
+#[derive(Debug)]
+pub enum FetchError {
+    /// The endpoint is behind a bot-management product that challenged the
+    /// request before GraphQL was reached.
+    Blocked { vendor: &'static str, hint: String },
+    /// Introspection is disabled/blocked at the GraphQL layer (the historical
+    /// "try brute" case).
+    Introspection(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Blocked { vendor, hint } => {
+                write!(f, "Blocked by {} bot management. {}", vendor, hint)
+            }
+            FetchError::Introspection(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+/// Collect a response's headers into a lowercased-key map, joining multi-valued
+/// headers (notably `set-cookie`) so [`detect_bot_wall`] can inspect them.
+fn collect_headers(resp: &reqwest::Response) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for (name, value) in resp.headers().iter() {
+        let key = name.as_str().to_ascii_lowercase();
+        let val = value.to_str().unwrap_or("").to_string();
+        map.entry(key)
+            .and_modify(|e| {
+                e.push_str(", ");
+                e.push_str(&val);
+            })
+            .or_insert(val);
+    }
+    map
 }
 
 /// A small pool of current, realistic browser User-Agent strings. The tool
@@ -63,13 +107,64 @@ pub fn build_client(
     let ua = user_agent_override
         .map(str::to_string)
         .unwrap_or_else(|| default_user_agent().to_string());
-    let _ = stealth;
 
     builder = builder.user_agent(ua);
+
+    // Send a realistic browser header baseline so endpoints (and WAFs) that
+    // expect more than a lone User-Agent don't reject the request outright.
+    // `Accept`/`Accept-Language` are always safe; the `sec-*` client hints are
+    // only added under `--stealth` to more closely match a Chromium fetch.
+    // Same-origin `Origin`/`Referer` need the target URL and are added by the
+    // caller (main) since `build_client` is URL-agnostic. None of this defeats
+    // a JS-sensor bot wall (e.g. PerimeterX) — see `waf.rs`.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        HeaderValue::from_static("application/json, text/plain, */*"),
+    );
+    headers.insert(
+        reqwest::header::ACCEPT_LANGUAGE,
+        HeaderValue::from_static("en-US,en;q=0.9"),
+    );
+    if stealth {
+        for (name, value) in [
+            ("sec-ch-ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\""),
+            ("sec-ch-ua-mobile", "?0"),
+            ("sec-ch-ua-platform", "\"Windows\""),
+            ("sec-fetch-dest", "empty"),
+            ("sec-fetch-mode", "cors"),
+            ("sec-fetch-site", "same-origin"),
+        ] {
+            if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(value)) {
+                headers.insert(n, v);
+            }
+        }
+    }
+    builder = builder.default_headers(headers);
 
     builder.build().map_err(|e| e.to_string())
 }
 
+/// Same-origin `Origin` and `Referer` derived from a target URL, as
+/// `key=value` header strings suitable for the `--header` pipeline. Returns an
+/// empty vec if the URL has no parseable scheme+host. Used to make requests
+/// look like a same-origin browser fetch (safe: same origin ⇒ no CSRF change).
+pub fn same_origin_headers(url: &str) -> Vec<String> {
+    // Extract scheme://host[:port] without pulling in a URL crate.
+    let rest = match url.split_once("://") {
+        Some((scheme, tail)) => {
+            let host = tail.split(['/', '?', '#']).next().unwrap_or("");
+            if host.is_empty() {
+                return vec![];
+            }
+            format!("{}://{}", scheme, host)
+        }
+        None => return vec![],
+    };
+    vec![format!("Origin={}", rest), format!("Referer={}/", rest)]
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_introspection(
     url: &str,
     extra_headers: &[String],
@@ -79,8 +174,10 @@ pub async fn fetch_introspection(
     user_agent: Option<&str>,
     stealth: bool,
     transport: Transport,
-) -> Result<GqlSchema, String> {
-    let client = build_client(timeout_secs, user_agent, stealth)?;
+    verbose: bool,
+    max_type_walk: usize,
+) -> Result<GqlSchema, FetchError> {
+    let client = build_client(timeout_secs, user_agent, stealth).map_err(FetchError::Introspection)?;
     let vectors = vec![
         ("Full Introspection", INTROSPECTION_QUERY.to_string()),
         ("Partial (Types only)", "query { __schema { types { name kind fields { name } } } }".to_string()),
@@ -115,6 +212,30 @@ pub async fn fetch_introspection(
 
         let status = resp.status();
         if !status.is_success() {
+            // A bot-management challenge (403/503 captcha, etc.) fails every
+            // vector for the same reason — detect it from the body/headers and
+            // stop immediately with an honest diagnosis rather than churning
+            // through `__type`-walk / advising `brute`, which are blocked too.
+            let code = status.as_u16();
+            let hdrs = collect_headers(&resp);
+            let body = resp.text().await.unwrap_or_default();
+            if let Some(wall) = detect_bot_wall(code, &hdrs, &body) {
+                return Err(FetchError::Blocked { vendor: wall.vendor, hint: wall.hint });
+            }
+            // Some servers return a valid GraphQL response with a non-2xx status
+            // (e.g. graphql-ruby answers introspection with HTTP 422). Parse the
+            // body so we surface the real reason instead of an opaque HTTP code —
+            // and still accept introspection data if it happens to be present.
+            if let Ok(parsed) = serde_json::from_str::<IntrospectionResponse>(&body) {
+                if let Some(data) = parsed.data {
+                    return Ok(data.schema);
+                }
+                if let Some(errors) = parsed.errors {
+                    let msgs: Vec<_> = errors.iter().map(|e| e.message.clone()).collect();
+                    last_error = format!("HTTP {} ({}): {}", code, name, msgs.join("; "));
+                    continue;
+                }
+            }
             last_error = format!("HTTP {}: server returned an error.", status);
             continue;
         }
@@ -149,28 +270,41 @@ pub async fn fetch_introspection(
     if let Some(t) = token {
         walk_headers.push(("Authorization".to_string(), format!("Bearer {}", t)));
     }
-    if let Ok(schema) = crate::type_walk::reconstruct_via_type_walk(
+    let walk_error = match crate::type_walk::reconstruct_via_type_walk(
         &client,
         url,
         &walk_headers,
         rate_limit_ms,
         transport,
-        true,
+        verbose,
+        max_type_walk,
     )
     .await
     {
-        eprintln!(
-            "  {} `__schema` blocked; reconstructed {} types via `__type`-walk (partial schema).",
-            "→".blue(),
-            schema.types.len()
-        );
-        return Ok(schema);
-    }
+        Ok(schema) => {
+            eprintln!(
+                "  {} `__schema` blocked; reconstructed {} types via `__type`-walk (partial schema).",
+                "→".blue(),
+                schema.types.len()
+            );
+            return Ok(schema);
+        }
+        Err(e) => e,
+    };
 
-    Err(format!(
-        "All introspection vectors failed. Last error: {}",
-        last_error
-    ))
+    // Every vector failed. Surface the real server reason (the last GraphQL error
+    // seen on the `__schema` attempts), and add a targeted hint when the server
+    // rejected introspection on a depth/complexity guard — the most common cause,
+    // which the caller can work around by lowering the introspection query depth.
+    let low = last_error.to_lowercase();
+    let hint = if low.contains("depth") || low.contains("complexity") || low.contains("too deep") {
+        " (server enforces an introspection depth/complexity limit — `__type`-walk is the intended fallback here)"
+    } else {
+        ""
+    };
+    Err(FetchError::Introspection(format!(
+        "All introspection vectors failed. Last `__schema` error: {last_error}{hint}. `__type`-walk fallback also failed: {walk_error}"
+    )))
 }
 
 pub async fn probe_graphql_endpoint(
@@ -261,14 +395,37 @@ async fn probe_with_transport(
         .map_err(|e| format!("Probe request failed: {}", e))?;
 
     let status = resp.status();
-    if status.as_u16() == 401 || status.as_u16() == 403 {
+    if !status.is_success() {
+        let code = status.as_u16();
+        let hdrs = collect_headers(&resp);
+        let body = resp.text().await.unwrap_or_default();
+        if let Some(wall) = detect_bot_wall(code, &hdrs, &body) {
+            return Ok(EndpointProbeResult {
+                graphql_confirmed: false,
+                http_status: code,
+                summary: format!(
+                    "HTTP {} — endpoint is behind {} bot management; requests are blocked before reaching GraphQL.",
+                    code, wall.vendor
+                ),
+                resolved_transport: transport,
+            });
+        }
+        if code == 401 || code == 403 {
+            return Ok(EndpointProbeResult {
+                graphql_confirmed: false,
+                http_status: code,
+                summary: format!(
+                    "HTTP {} from probe endpoint. This path may be GraphQL but requires authentication.",
+                    status
+                ),
+                resolved_transport: transport,
+            });
+        }
+        // Any other non-success status: report and stop (body already consumed).
         return Ok(EndpointProbeResult {
             graphql_confirmed: false,
-            http_status: status.as_u16(),
-            summary: format!(
-                "HTTP {} from probe endpoint. This path may be GraphQL but requires authentication.",
-                status
-            ),
+            http_status: code,
+            summary: format!("HTTP {} from probe endpoint.", status),
             resolved_transport: transport,
         });
     }

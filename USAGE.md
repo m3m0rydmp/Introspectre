@@ -37,7 +37,7 @@ introspectre scan http://target.com/graphql --use-schema ./schema.json
 
 ### Case: You want active probes as part of the same run
 ```bash
-introspectre scan http://target.com/graphql --static-only false --visualize report.html
+introspectre scan http://target.com/graphql --static-only false --visualize
 ```
 
 ---
@@ -108,6 +108,86 @@ Both commands accept `--dynamic-throttling` and `-c/--concurrency` to control ho
 
 ---
 
+## 4·0. Server fingerprint
+
+`scan`, `brute`, and `audit` identify the target's **GraphQL server framework** (graphw00f-style) and print it during the run and in every report header:
+
+```
+→ Server: graphql-ruby (Ruby) [confirmed]
+```
+
+Detection uses free schema-shape signals (e.g. Hasura's `_by_pk`/`timestamptz`), response headers, and a couple of benign error probes. It reports nothing rather than guess when unsure. Pass `--no-fingerprint` to skip the extra recon requests. The result is included in `--format json`/`markdown` (`server_fingerprint`) and the HTML report.
+
+---
+
+## 4a. WAF / bot-protected endpoints
+
+Some GraphQL endpoints sit behind a **bot-management product** (PerimeterX/HUMAN, Cloudflare, Akamai, DataDome, Imperva). These challenge the request *before it ever reaches GraphQL* — typically an HTTP `403`/`404` captcha or "access denied" HTML page. When Introspectre detects one, it reports the vendor and the real cause instead of suggesting `brute` (which is blocked the same way):
+
+```
+! Endpoint is behind Cloudflare bot management (HTTP challenge) — requests are blocked
+  before reaching GraphQL, so this is not an introspection setting.
+```
+
+A bot wall like this **cannot be bypassed by the tool on its own** — that would defeat the protection. The legitimate path for authorized testing is to **reuse a real browser session**:
+
+1. Open the target in a normal browser and let it pass the challenge.
+2. Reuse that session with the tool, either by:
+
+```bash
+# (a) paste the session cookies directly:
+introspectre scan https://target.com/graphql --cookie "_px3=...; __cf_bm=...; cf_clearance=..."
+
+# (b) or capture the GraphQL request as a HAR and let the tool replay its cookies/auth headers:
+introspectre scan https://target.com/graphql --seed-traffic ./session.har
+```
+
+With `--seed-traffic`, Introspectre now replays the captured request's `Cookie`, `Authorization`, and custom `x-*` headers (matched to the target host), not just its variable values. Add `--stealth` to send Chromium client-hint headers and a same-origin `Origin`/`Referer`, which helps with header-checking WAFs (it does not defeat a JS-sensor product like PerimeterX — only a real session will).
+
+---
+
+## 4b. Caching & re-runs
+
+`scan` and `brute` **reuse the last cached schema for a target by default**. Results are stored in a local `introspectre.db` (per working directory), so re-running against the same endpoint regenerates the report **without another round of requests** — handy when you forgot `--visualize` the first time:
+
+```bash
+introspectre scan https://api.target.com/graphql                  # fresh: fetches + caches
+introspectre scan https://api.target.com/graphql --visualize      # served from cache, 0 requests
+```
+
+A notice shows the cache timestamp. To force a fresh fetch (e.g. the schema changed), clear the target's cache:
+
+```bash
+introspectre scan https://api.target.com/graphql --purge-cache
+```
+
+To clear **every** target at once (all cached scans, learned seeds, and project records — e.g. to tidy the visualizer's target switcher), use the global `--purge-db`. It needs no subcommand and asks for a typed `yes` first:
+
+```bash
+introspectre --purge-db
+```
+
+Live operations always bypass the cache and fetch fresh: `scan --static-only false` and `audit`.
+
+### `__type`-walk cap
+
+When introspection is disabled but `__type` is reachable, Introspectre reconstructs the schema one type at a time, bounded by a safety cap (default **1000** types). If a large schema is truncated, a `schema is PARTIAL` warning is shown **by default**. Raise the cap to reconstruct more — either edit `config.toml`:
+
+```toml
+[audit]
+max_type_walk_types = 5000   # 0 = unlimited
+```
+
+or set it with the `config` command (no hand-editing; comments are preserved):
+
+```bash
+introspectre config set audit.max_type_walk_types 5000
+introspectre config get audit.max_type_walk_types
+introspectre config show          # print the config path + contents
+```
+
+All tool settings live in `config.toml` (loaded from the current directory, or `--config <file>`); `config set` accepts any dotted key, e.g. `config set audit.test_injection true`.
+
 ## 5. Smart Data Synthesis
 
 To get past strict input validation, Introspectre needs to know what "good" data looks like for a given field — a generic string sent to a field expecting a UUID will simply get rejected before it reaches anything interesting.
@@ -136,6 +216,19 @@ Variables are harvested from all three places a GraphQL request can carry them: 
 introspectre audit http://target.com/graphql --seeds ./seeds.json
 ```
 `seeds.json` maps a type or field name to a literal value, e.g. `{ "UserID": "\"user-123\"", "Email": "\"test@example.com\"" }`.
+
+### Confirmed injections → sqlmap hand-off
+
+Introspectre *confirms* SQL/NoSQL injection but does not perform full exploitation/extraction. When the audit confirms an injection, each finding includes a ready-to-run **sqlmap** command tailored to the endpoint and the injectable argument (its value marked with `*`), in the terminal, JSON (`exploit_guide`), markdown, and the HTML report:
+
+```bash
+sqlmap -u "https://target/graphql" --batch --method=POST \
+  --headers="Content-Type: application/json" \
+  --data='{"query":"...","variables":{"username":"*"}}' --level=5 --risk=3
+# nested/inlined cases: save the request to req.txt, mark the value with * , then: sqlmap -r req.txt
+```
+
+Run `audit --verbose` to see a live `✓ FOUND: …` line the moment a probe confirms something (progress is on stderr, so `--format json` output stays clean).
 
 ---
 
@@ -170,12 +263,24 @@ Active probing — especially the DoS-class checks — can stress a target. Agai
 
 `audit` also runs a set of **safe, single-request configuration checks** by default — `introspection-matrix` (which of `__schema`/`__type`/"did you mean?" are open, and at what auth level), `cors` (cross-origin `Access-Control-*` reflection), `apq` (Apollo persisted-query support), and `alias-cap` (per-field alias limit). They generate negligible load; skip any with `--skip <id>`.
 
+### Node/Relay `node(id:)` IDOR (`node-idor` probe)
+
+When a schema exposes a Relay `node(id:)` global fetcher, the `node-idor` audit probe obtains a **real global id** — from `--seeds`/`--seed-traffic`, or by fetching one of *your own* accessible objects — and base64-decodes it to classify the id scheme. A sequential scheme (`gid://host/Type/123`, `Type:123`, or a bare integer) is flagged **High** with a ready-to-run **adjacent-id PoC**; opaque/signed or UUID ids are reported as non-enumerable. It also runs a `node(id){ …on OtherType{…} }` type-confusion check. It only uses ids you can already read (no cross-tenant access). Supplying a real id via `--seeds` gives the sharpest result:
+
+```bash
+introspectre audit https://api.target.com/graphql --only node-idor --seeds ./ids.json
+# then, MANUALLY and only if in scope: request the adjacent id as a different identity /
+# logged out. Private data returned to an unauthorized viewer = confirmed broken object auth.
+```
+
 | Flag | Effect |
 | :--- | :--- |
 | `--no-dos` | Skips every DoS-class probe (alias amplification, batching, complexity, nested-list expansion). Use this for functional/coverage runs where you don't want to generate load. |
 | `--skip <ids>` | Comma-separated probe ids to skip, e.g. `--skip ssrf,xss`. |
-| `--only <ids>` | Run *only* these probe ids, e.g. `--only sql-injection,idor`. |
-| `--dry-run` | Prints the probes that *would* run, an estimated request count per probe, and a total wall-clock estimate — and sends **no requests at all**. |
+| `--only <ids>` | Run *only* these probe ids, e.g. `--only sql-injection,idor`. Naming an injection probe auto-enables it. |
+| `--injection` | Enable the injection-class probes (`sql-injection`, `os-command-injection`, `ssrf`, `xss`), which are **off by default** (they send exploit-style payloads). |
+| `--chain` | **Auto-chain:** on a confirmed SQL injection, best-effort extract credentials (UNION-dump a users table) and feed a recovered username/password into later probes as seeds, so auth-gated sinks can be reached automatically. Aggressive (exfiltrates data); implies `--injection`. |
+| `--dry-run` | Prints the probes that *would* run (and **lists the config-disabled ones**), an estimated request count per probe, and a total wall-clock estimate — sends **no requests at all**. |
 | `--focus <TYPE\|TYPE.field>` | Aim active probing at a subset of root fields — a whole root (`mutation`), a qualified field (`Query.user`), or a name substring (`report`). |
 | `--max-targets <N>` | Cap the targets each fan-out probe tests (`0` = unlimited). |
 | `--max-requests <N>` | Global cap on the total active requests sent. |
@@ -214,14 +319,18 @@ introspectre audit https://api.big.com/graphql --focus user,report --max-targets
 
 ## 8. Reading the Visual Report
 
-The `--visualize` report renders the schema as an interactive graph. It runs on a **WebGL** engine (Sigma.js + graphology) so it stays responsive on large schemas, and it is a single self-contained file that works offline. A few things about it are worth knowing:
+`--visualize` starts a **local web server** (bound strictly to `127.0.0.1`) and opens the interactive attack-surface graph in your browser. It runs in the foreground and stays up until you press **Ctrl+C**; the URL is printed on start (default `http://127.0.0.1:7878/`, or the next free port), and `--port` sets a preferred port. The graph is served entirely from the binary — assets are embedded, and the analysis result is delivered as JSON at `GET /api/schema` — so nothing is written to disk and it works offline. The graph renders on **WebGL** (Sigma.js + graphology) with a native camera: **scroll to zoom, drag the background to pan**, and **drag a node** to reposition it; clicking a node only *selects* it (it never moves the viewport).
 
 - **Nodes are *types*, not fields.** Each box is a GraphQL type (e.g. `User`, `AddonUser`); the arrows between them are labeled with the field that connects them. A single type appears **once**, even though many fields across the schema return it.
-- **Clicking a node expands it progressively.** Because types are shared, expanding a node draws edges to it from *every* currently-visible type that references it — so nodes that aren't directly connected to the one you clicked can appear. To avoid overwhelming you on a large schema, each click reveals a **capped** set of a node's relations (prioritising higher-risk targets); right-click a node for **Expand all** to reveal the rest. Only the newly added nodes are laid out, so the rest of the graph stays put.
-- **Hover to highlight.** Hovering a node highlights its immediate neighborhood so you can trace connections without clicking.
-- **Isolate Mode.** A click there deliberately shows the full path from a root down to the selected node *and* everything reachable downstream of it — useful for tracing how an attacker reaches a sensitive field, though it surfaces many indirect nodes on purpose.
+- **Click a node to inspect it.** The right-hand panel shows its kind, risk, tags (root / auth-required / sensitive), findings on it, and a **Sample Query** — a complete, runnable `query { … }` reaching that node via the shortest path from a root operation (objects get a nested selection; scalars and enums get the leaf field path; arguments are filled from learned seeds or synthesized samples). Root-operation fields also expose a per-field template. Enums list their values. Copying a template yields just the query — `#` hint comments are stripped from the clipboard. Its outgoing fields and referencing types are listed and clickable.
+- **Right-click for graph actions.** Expand relations, expand all children, trace the path back to a root operation, or hide a node.
+- **Hover to highlight.** Hovering a node dims everything except its immediate neighborhood so you can trace connections without clicking.
+- **Isolate mode.** Toggle it in the toolbar to keep only the selected node and its direct neighbors on screen.
+- **Schema tab.** Alongside the stat cards, a collapsible **type → field tree** (grouped by kind, with enum values) lets you browse the whole schema; the detected **server framework** is shown here (or *undetected*). Click any type or return-type to focus it in the graph.
+- **Target switcher.** The top-bar dropdown lists every target you've previously scanned (cached in `introspectre.db`). Pick another to reload its graph and panels **without re-scanning or any network request** — the server reconstructs it from the stored schema. (Clear old entries with `--purge-cache` on that target.)
+- **Guide.** The **Guide** button opens an offline GraphQL-security reference (language, ecosystem, attack vectors mapped to what Introspectre detects, and a workflow). If the target's framework was fingerprinted, its section is surfaced first.
 
-If a large schema still feels busy, keep **Scalars: HIDDEN** on, use the search box to jump to (and focus) a type, and use **Isolate Mode** to focus a single path.
+If a large schema still feels busy, keep **Scalars: hidden** on, use the search box to jump to (and focus) a type, and use **Show all** only when you want the full graph.
 
 ---
 
@@ -245,10 +354,13 @@ If a large schema still feels busy, keep **Scalars: HIDDEN** on, use the search 
 | `--only <IDS>` | Run only these comma-separated probe ids. |
 | `--dry-run` | Print the probes that would run without sending any requests. |
 | `--use-schema <FILE>` | Use a local schema JSON file instead of live introspection. |
-| `--visualize [PATH]` | Generate the interactive HTML report (default `introspectre-visual.html`). |
+| `--purge-db` | **Wipe the entire cache database** (all targets, scans, and learned seeds) after a `yes` confirmation. Runs on its own — no subcommand needed. |
+| `--visualize` | Serve the interactive attack-surface graph on a local web server (`127.0.0.1` only, opens your browser, runs until Ctrl+C). |
+| `--port <PORT>` | Preferred port for `--visualize` (default `7878`; auto-falls back to a free port if busy). |
 | `--seed-traffic <FILE>` | Learn variable values from a HAR or Burp XML file. |
-| `--seeds <FILE>` | Provide known-good values via JSON. |
+| `--seeds <FILE>` | Provide known-good values via JSON, matched **by argument/input-field name or by type name** (arg-name wins). E.g. `{"username":"admin","password":"changeme","UserID":"\"u-1\""}` — supply real credentials/tokens/ids so auth-gated sinks can be reached. Injection payloads still override seeds. |
 | `--verbose` | Include extra detail (e.g., PoC blocks) in text output. |
+| `--exit-zero` | Always exit `0`, even when High/Medium findings are present (suppresses the CI "findings gate"). Useful for interactive or chained runs; the report is unchanged. |
 
 ### `scan`-specific flags
 

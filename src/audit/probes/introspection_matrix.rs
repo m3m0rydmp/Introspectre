@@ -130,7 +130,90 @@ pub async fn probe_introspection_matrix(
         poc: Some("# Unauthenticated (no Authorization header):\nquery { __type(name: \"Query\") { name fields { name } } }".into()),
     });
 
+    // Also flag an exposed in-browser GraphQL IDE (GraphiQL/Playground/Altair/Voyager), a recon
+    // convenience for attackers that often ships enabled by mistake.
+    if let Some((ide_url, ide)) = detect_ide(client, url, extra_headers, rate_limit_ms).await {
+        confirmed.push(Finding {
+            id: "graphiql-exposed",
+            severity: Severity::Low,
+            title: "GraphQL IDE Exposed",
+            description: format!(
+                "An in-browser GraphQL IDE ({}) is served at `{}`. It gives an attacker an interactive console — schema browsing, autocompletion, and query execution — and usually signals a non-production hardening gap.",
+                ide, ide_url
+            ),
+            affected: vec![AffectedLocation::Type("GraphQL IDE".into())],
+            remediation: "Disable the GraphQL IDE (GraphiQL/Playground/Altair/Voyager) in production, or require authentication to reach it.",
+            first_step: Some(format!("Open {} in a browser and confirm the IDE loads.", ide_url)),
+            references: vec!["CWE-200: Information Exposure", "OWASP API Security Top 10"],
+            status: FindingStatus::Confirmed,
+            confidence: Confidence::Confirmed,
+            evidence_level: EvidenceLevel::Executed,
+            poc: Some(format!("# Open in a browser:\n{}", ide_url)),
+        });
+    }
+
     Ok(())
+}
+
+/// Best-effort detection of an exposed in-browser GraphQL IDE. Tries the endpoint itself and a few
+/// sibling paths with a plain `GET` (`Accept: text/html`), and matches well-known IDE markers in the
+/// returned HTML. Returns `(url, ide_name)` on the first hit. Any supplied headers (e.g. `--cookie`)
+/// are forwarded, so an IDE gated behind a cookie/session is still detectable when the operator has one.
+async fn detect_ide(
+    client: &Client,
+    endpoint: &str,
+    extra_headers: &[String],
+    rate_limit_ms: u64,
+) -> Option<(String, String)> {
+    let mut candidates: Vec<String> = vec![endpoint.to_string()];
+    if let Some(base) = endpoint.strip_suffix("/graphql") {
+        for p in ["/graphiql", "/playground", "/altair", "/voyager", "/console"] {
+            candidates.push(format!("{}{}", base, p));
+        }
+    } else {
+        for p in ["/graphiql", "/playground"] {
+            candidates.push(format!("{}{}", endpoint.trim_end_matches('/'), p));
+        }
+    }
+
+    let extra = crate::utils::parse_extra_headers(extra_headers);
+    for cand in candidates {
+        if rate_limit_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(rate_limit_ms)).await;
+        }
+        let mut req = client.get(&cand).header("Accept", "text/html");
+        for (k, v) in &extra {
+            req = req.header(k, v);
+        }
+        let Ok(resp) = req.send().await else { continue };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let is_html = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("html"))
+            .unwrap_or(false);
+        let body = resp.text().await.unwrap_or_default();
+        let lower = body.to_lowercase();
+        if !(is_html || lower.contains("<!doctype html") || lower.contains("<html")) {
+            continue;
+        }
+        let ide = if lower.contains("graphiql") {
+            "GraphiQL"
+        } else if lower.contains("graphql playground") || lower.contains("graphql-playground") {
+            "GraphQL Playground"
+        } else if lower.contains("altair") {
+            "Altair"
+        } else if lower.contains("voyager") {
+            "GraphQL Voyager"
+        } else {
+            continue;
+        };
+        return Some((cand, ide.to_string()));
+    }
+    None
 }
 
 fn data_has(r: &crate::audit::utils::ProbeResponse, key: &str) -> bool {

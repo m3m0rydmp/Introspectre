@@ -41,12 +41,18 @@ pub async fn probe_command_injection(
         }
     }
 
-    // Focus / rank by passive severity / cap to --max-targets before probing.
-    let targets = crate::audit::targets::scope_targets(
+    // Focus / rank (command-execution name affinity first, then passive severity) / cap.
+    // The affinity boost keeps an obvious sink like `systemDebug(arg)` from being starved by the
+    // budget behind passively-flagged but non-vulnerable fields.
+    let targets = crate::audit::targets::scope_targets_prioritized(
         targets,
         ctx.sev_index,
         ctx.scope,
         |t| (t.1.to_string(), t.2.name.clone()),
+        |t| crate::audit::targets::name_affinity(
+            &format!("{} {} {}", t.2.name, t.3.name, t.4),
+            crate::audit::targets::CMDI_KEYWORDS,
+        ),
     );
 
     let headers = effective_headers(extra_headers, None, false);

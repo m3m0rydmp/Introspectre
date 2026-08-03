@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Introspectre — Attack Surface</title>
+    <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Top bar -->
+        <header id="topbar">
+            <div class="brand">
+                <span class="brand-mark">◈</span>
+                <span class="brand-name">INTROSPECTRE</span>
+                <span class="brand-sub">attack surface</span>
+            </div>
+            <div class="endpoint">
+                <button id="guide-btn" class="guide-btn" title="GraphQL security guide">Guide</button>
+                <select id="target-select" class="target-select" title="Switch to another cached target"></select>
+                <span id="endpoint-url" class="mono"></span>
+                <span id="fingerprint-badge" class="badge" style="display:none"></span>
+            </div>
+        </header>
+
+        <!-- Toolbar -->
+        <div id="toolbar">
+            <div class="tool-group search">
+                <input id="search-input" type="text" placeholder="Search types & fields…" autocomplete="off" spellcheck="false">
+                <div id="search-results"></div>
+            </div>
+            <div class="tool-group">
+                <button class="tbtn active" id="btn-scalars" title="Show/hide scalar & enum nodes">Scalars: hidden</button>
+                <button class="tbtn" id="btn-isolate" title="Isolate: click a node to show only it and its neighbors">Isolate: off</button>
+                <button class="tbtn" id="btn-showall" title="Render the entire schema">Show all</button>
+                <button class="tbtn" id="btn-reset" title="Reset to root operations">Reset</button>
+                <button class="tbtn" id="btn-fit" title="Fit graph to screen">Fit</button>
+            </div>
+            <div class="tool-group counts">
+                <span id="node-count" class="chip">0 nodes</span>
+                <span id="edge-count" class="chip">0 edges</span>
+            </div>
+        </div>
+
+        <!-- Main -->
+        <div id="main">
+            <div id="graph"></div>
+            <div id="loading" class="overlay"><div class="spinner"></div><span>Loading schema…</span></div>
+
+            <!-- Legend -->
+            <div id="legend">
+                <div class="legend-title">Risk</div>
+                <div class="legend-row"><span class="dot" style="background:#ff3b6b"></span>Critical</div>
+                <div class="legend-row"><span class="dot" style="background:#ff7b39"></span>High</div>
+                <div class="legend-row"><span class="dot" style="background:#ffcf3f"></span>Medium</div>
+                <div class="legend-row"><span class="dot" style="background:#63d2ff"></span>Low / Info</div>
+                <div class="legend-row"><span class="dot" style="background:#5a6580"></span>No finding</div>
+                <div class="legend-title" style="margin-top:8px">Kind (ring)</div>
+                <div class="legend-row"><span class="ring" style="border-color:#39d3ff"></span>Object</div>
+                <div class="legend-row"><span class="ring" style="border-color:#b47cff"></span>Enum</div>
+                <div class="legend-row"><span class="ring" style="border-color:#ffcf3f"></span>Input</div>
+                <div class="legend-row"><span class="ring" style="border-color:#6ee7b7"></span>Interface</div>
+                <div class="legend-row"><span class="ring" style="border-color:#5a6580"></span>Scalar</div>
+            </div>
+
+            <!-- Context menu -->
+            <div id="ctxmenu" class="ctxmenu">
+                <div class="ctx-item" data-act="expand">Expand relations</div>
+                <div class="ctx-item" data-act="expandall">Expand all children</div>
+                <div class="ctx-item" data-act="trace">Trace path to root</div>
+                <div class="ctx-item ctx-danger" data-act="hide">Hide node</div>
+            </div>
+        </div>
+
+        <!-- Side panel -->
+        <aside id="side">
+            <div class="tabs">
+                <button class="tab active" data-tab="findings">Findings <span id="findings-count" class="tab-count">0</span></button>
+                <button class="tab" data-tab="seeds">Seeds</button>
+                <button class="tab" data-tab="schema">Schema</button>
+            </div>
+            <div class="tab-body">
+                <div class="tab-pane active" id="pane-findings"></div>
+                <div class="tab-pane" id="pane-seeds"></div>
+                <div class="tab-pane" id="pane-schema"></div>
+            </div>
+            <!-- Node detail (slides over the panes when a node is selected) -->
+            <div id="node-detail" class="node-detail">
+                <button class="detail-close" id="detail-close" title="Close">&times;</button>
+                <div id="detail-body"></div>
+            </div>
+        </aside>
+
+        <!-- Guide overlay -->
+        <div id="guide-overlay" class="guide-overlay">
+            <div class="guide-modal">
+                <button class="guide-close" id="guide-close" title="Close">&times;</button>
+                <div class="guide-toc" id="guide-toc"></div>
+                <div class="guide-content" id="guide-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/assets/vendor/graphology.umd.min.js"></script>
+    <script src="/assets/vendor/graphology-library.min.js"></script>
+    <script src="/assets/vendor/sigma.min.js"></script>
+    <script src="/assets/guide.js"></script>
+    <script src="/assets/app.js"></script>
+</body>
+</html>
