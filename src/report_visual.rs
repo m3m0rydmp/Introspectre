@@ -1,8 +1,12 @@
 use serde::Serialize;
-use std::fs;
-use std::path::PathBuf;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::types::{AuthDiscoveryResult, Finding, GqlSchema, ReportMeta, SchemaStats, Severity};
+
+/// Cap on how deep a root→type query path may nest before we fall back to a bare
+/// selection fragment, so a pathological schema can't produce absurd queries.
+const MAX_PATH_DEPTH: usize = 6;
 
 #[derive(Serialize)]
 struct VisualNode {
@@ -18,6 +22,14 @@ struct VisualNode {
     is_root: bool,
     #[serde(rename = "opType")]
     op_type: Option<String>,
+    /// A complete, runnable `query { … }` (or `mutation`/`subscription`) that reaches this
+    /// node via the shortest path from a root operation. `None` for root types (their queries
+    /// live per field on the outgoing edges) and for types unreachable from any root.
+    #[serde(rename = "sampleQuery", skip_serializing_if = "Option::is_none")]
+    sample_query: Option<String>,
+    /// For ENUM nodes, the value names — so the schema tree can list them.
+    #[serde(rename = "enumValues", skip_serializing_if = "Option::is_none")]
+    enum_values: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -40,6 +52,10 @@ struct VisualEdge {
     is_deprecated: bool,
     args: Vec<VisualArg>,
     weight: f64,
+    /// A ready-to-run operation template — set only on edges from a root type
+    /// (Query/Mutation/Subscription) so the detail panel can show a per-field sample query.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -274,6 +290,248 @@ fn query_template_with_auth_hint(
     query
 }
 
+/// Up to 8 selectable field lines for an object-like type (composite fields get a nested
+/// `{ id }`/`{ __typename }`). The shared building block for both the leaf selection of a
+/// path query and the bare-fragment fallback.
+fn selection_field_lines(schema: &GqlSchema, type_name: &str) -> Vec<String> {
+    let fields = match schema.find_type(type_name).and_then(|t| t.fields.as_ref()) {
+        Some(f) if !f.is_empty() => f,
+        _ => return vec!["__typename".to_string()],
+    };
+    let mut lines = Vec::new();
+    for f in fields.iter().take(8) {
+        let inner = f.field_type.as_ref().and_then(|t| t.unwrap_type_name());
+        let child = inner.as_ref().and_then(|n| schema.find_type(n));
+        let is_composite = child
+            .map(|t| matches!(t.kind.as_deref(), Some("OBJECT") | Some("INTERFACE") | Some("UNION")))
+            .unwrap_or(false);
+        if is_composite {
+            let child_sel = child
+                .and_then(|t| t.fields.as_ref())
+                .and_then(|fs| fs.iter().find(|cf| cf.name == "id" || cf.name == "uuid" || cf.name == "name"))
+                .map(|cf| cf.name.clone())
+                .unwrap_or_else(|| "__typename".to_string());
+            lines.push(format!("{} {{ {} }}", f.name, child_sel));
+        } else {
+            lines.push(f.name.clone());
+        }
+    }
+    lines
+}
+
+/// A bare selection fragment (`{\n  id\n  … }`) for an object-like type — the fallback shown
+/// when a type is not reachable from any root operation.
+fn sample_selection(schema: &GqlSchema, type_name: &str) -> String {
+    let body = selection_field_lines(schema, type_name)
+        .iter()
+        .map(|l| format!("  {}", l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{{\n{}\n}}", body)
+}
+
+/// The cost of *entering* a field on a query path: 1 for the hop itself, plus a penalty for each
+/// **required** argument (scalar/enum/ID `+1`, `INPUT_OBJECT`/list-of-input `+3`). Optional args add
+/// nothing — they can be omitted. So a trivial `userById(id: ID!)` beats `search(input: In!)`, and an
+/// arg-free (or optional-only) field beats both, even when they sit at the same depth.
+fn field_arg_cost(schema: &GqlSchema, field: &crate::types::GqlField) -> u32 {
+    let args = match &field.args {
+        Some(a) if !a.is_empty() => a,
+        _ => return 0,
+    };
+    let mut cost = 0;
+    for arg in args {
+        let required = arg
+            .arg_type
+            .as_ref()
+            .map(|t| t.kind.as_deref() == Some("NON_NULL"))
+            .unwrap_or(false);
+        if !required {
+            continue;
+        }
+        let type_name = arg.arg_type.as_ref().and_then(|t| t.unwrap_type_name()).unwrap_or_default();
+        let kind = schema.find_type(&type_name).and_then(|t| t.kind.clone()).unwrap_or_default();
+        cost += if kind == "INPUT_OBJECT" { 3 } else { 1 };
+    }
+    cost
+}
+
+/// Multi-source **Dijkstra** from the root operation types over `type --field--> returnType` edges,
+/// with edge weight `1 + field_arg_cost(field)`. Returns a parent map
+/// `target_type -> (source_type, field_name)` giving the **cheapest** (fewest-hops, then
+/// simplest-args) path from a root to each reachable type. Root types have no entry.
+fn compute_query_paths(schema: &GqlSchema) -> HashMap<String, (String, String)> {
+    let mut parent: HashMap<String, (String, String)> = HashMap::new();
+    let mut dist: HashMap<String, u32> = HashMap::new();
+    let mut heap: BinaryHeap<Reverse<(u32, String)>> = BinaryHeap::new();
+
+    for root in [
+        schema.query_type.as_ref(),
+        schema.mutation_type.as_ref(),
+        schema.subscription_type.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if dist.insert(root.name.clone(), 0).is_none() {
+            heap.push(Reverse((0, root.name.clone())));
+        }
+    }
+
+    while let Some(Reverse((d, type_name))) = heap.pop() {
+        if d > *dist.get(&type_name).unwrap_or(&u32::MAX) {
+            continue; // stale heap entry
+        }
+        let gql_type = match schema.find_type(&type_name) {
+            Some(t) => t,
+            None => continue,
+        };
+        if let Some(fields) = &gql_type.fields {
+            for f in fields {
+                if let Some(ret) = f.field_type.as_ref().and_then(|t| t.unwrap_type_name()) {
+                    if ret.starts_with("__") {
+                        continue;
+                    }
+                    let nd = d + 1 + field_arg_cost(schema, f);
+                    if nd < *dist.get(&ret).unwrap_or(&u32::MAX) {
+                        dist.insert(ret.clone(), nd);
+                        parent.insert(ret.clone(), (type_name.clone(), f.name.clone()));
+                        heap.push(Reverse((nd, ret)));
+                    }
+                }
+            }
+        }
+    }
+    parent
+}
+
+/// Render a field's **required** arguments (`(id: "…")`) using learned seeds where the arg name
+/// matches, else a synthesized sample value. Optional args are omitted to keep the generated query
+/// minimal and satisfiable. Empty string when the field has no required args.
+fn render_field_args(
+    schema: &GqlSchema,
+    source_type: &str,
+    field_name: &str,
+    seeds: &[crate::traffic::TrafficSeed],
+) -> String {
+    let args = match schema
+        .find_type(source_type)
+        .and_then(|t| t.fields.as_ref())
+        .and_then(|fs| fs.iter().find(|f| f.name == field_name))
+        .and_then(|f| f.args.as_ref())
+    {
+        Some(a) if !a.is_empty() => a,
+        _ => return String::new(),
+    };
+
+    let parts: Vec<String> = args
+        .iter()
+        .filter(|arg| {
+            arg.arg_type
+                .as_ref()
+                .map(|t| t.kind.as_deref() == Some("NON_NULL"))
+                .unwrap_or(false)
+        })
+        .map(|arg| {
+            let type_name = arg
+                .arg_type
+                .as_ref()
+                .and_then(|t| t.unwrap_type_name())
+                .unwrap_or_else(|| "String".to_string());
+            let value = if let Some(seed) = seeds.iter().find(|s| s.field_name == arg.name) {
+                if type_name == "String" || type_name == "ID" {
+                    format!("\"{}\"", seed.value)
+                } else {
+                    seed.value.clone()
+                }
+            } else {
+                arg.arg_type
+                    .as_ref()
+                    .map(|tr| resolve_input_sample(schema, tr, &arg.name, 0))
+                    .unwrap_or_else(|| "\"VALUE\"".to_string())
+            };
+            format!("{}: {}", arg.name, value)
+        })
+        .collect();
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("({})", parts.join(", "))
+    }
+}
+
+/// Build a complete, runnable operation reaching `target` from a root, using the BFS `parent`
+/// map. Object-like leaves get a nested selection; scalar/enum leaves are the field itself.
+/// Returns `None` when `target` is a root type, unreachable, or deeper than [`MAX_PATH_DEPTH`].
+fn build_query_from_path(
+    schema: &GqlSchema,
+    parent: &HashMap<String, (String, String)>,
+    target: &str,
+    seeds: &[crate::traffic::TrafficSeed],
+) -> Option<String> {
+    // Walk the parent chain from target up to a root; `chain` ends up [(root, f1), … , (tN-1, fLeaf)].
+    let mut chain: Vec<(String, String)> = Vec::new();
+    let mut cur = target.to_string();
+    let mut guard: HashSet<String> = HashSet::new();
+    while let Some((src, field)) = parent.get(&cur) {
+        if !guard.insert(cur.clone()) {
+            break;
+        }
+        chain.push((src.clone(), field.clone()));
+        cur = src.clone();
+    }
+    if chain.is_empty() || chain.len() > MAX_PATH_DEPTH {
+        return None;
+    }
+
+    let root = cur; // the last source reached is the root operation type
+    let op = if schema.mutation_type.as_ref().map(|t| t.name.as_str()) == Some(root.as_str()) {
+        "mutation"
+    } else if schema.subscription_type.as_ref().map(|t| t.name.as_str()) == Some(root.as_str()) {
+        "subscription"
+    } else {
+        "query"
+    };
+
+    chain.reverse(); // now root → … → leaf
+    let fields_with_args: Vec<String> = chain
+        .iter()
+        .map(|(src, f)| format!("{}{}", f, render_field_args(schema, src, f, seeds)))
+        .collect();
+
+    let target_kind = schema.find_type(target).and_then(|t| t.kind.clone()).unwrap_or_default();
+    let leaf_lines = if matches!(target_kind.as_str(), "OBJECT" | "INTERFACE" | "UNION") {
+        selection_field_lines(schema, target)
+    } else {
+        Vec::new()
+    };
+
+    let n = fields_with_args.len();
+    let mut out = format!("{} {{\n", op);
+    for (i, fa) in fields_with_args.iter().enumerate() {
+        let ind = "  ".repeat(i + 1);
+        if i + 1 < n {
+            out.push_str(&format!("{}{} {{\n", ind, fa));
+        } else if leaf_lines.is_empty() {
+            out.push_str(&format!("{}{}\n", ind, fa)); // scalar/enum leaf: field itself
+        } else {
+            out.push_str(&format!("{}{} {{\n", ind, fa));
+            let lind = "  ".repeat(i + 2);
+            for l in &leaf_lines {
+                out.push_str(&format!("{}{}\n", lind, l));
+            }
+            out.push_str(&format!("{}}}\n", ind));
+        }
+    }
+    // Close the intermediate (non-leaf) field braces, then the operation brace.
+    for i in (0..n.saturating_sub(1)).rev() {
+        out.push_str(&format!("{}}}\n", "  ".repeat(i + 1)));
+    }
+    out.push('}');
+    Some(out)
+}
+
 fn get_risk_level(type_name: &str, findings: &[Finding]) -> String {
     let mut max_severity = Severity::Info;
     let mut found = false;
@@ -307,16 +565,23 @@ fn get_risk_level(type_name: &str, findings: &[Finding]) -> String {
     }
 }
 
-pub fn write_visual_report(
-    path: &PathBuf,
+/// Assemble the full visualization payload (graph, findings, seeds, stats, meta,
+/// server fingerprint) as a single JSON value. This is served verbatim by the
+/// local visualizer web server at `GET /api/schema`; the frontend fetches it on
+/// load instead of having the data baked into an HTML file.
+pub fn build_payload(
     schema: &GqlSchema,
     findings: &[Finding],
     meta: &ReportMeta,
     stats: &SchemaStats,
     seeds: &[crate::traffic::TrafficSeed],
-) -> Result<(), String> {
+) -> serde_json::Value {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
+
+    // Shortest root→type paths (single multi-source BFS), so every reachable node can carry a
+    // complete runnable query rather than a bare selection fragment.
+    let query_paths = compute_query_paths(schema);
 
     // 1. Create a node for EVERY type in the schema (including SCALARs)
     for gql_type in &schema.types {
@@ -365,6 +630,30 @@ pub fn write_visual_report(
             false
         };
 
+        // A complete query reaching this node from a root (non-root types only). If the type
+        // is unreachable from any root, fall back to a bare selection fragment for object-likes.
+        let sample_query = if is_root {
+            None
+        } else {
+            build_query_from_path(schema, &query_paths, name, seeds).or_else(|| {
+                if matches!(kind, "OBJECT" | "INTERFACE" | "UNION") {
+                    Some(sample_selection(schema, name))
+                } else {
+                    None
+                }
+            })
+        };
+
+        // Enum value names, so the schema tree can list them.
+        let enum_values = if kind == "ENUM" {
+            gql_type
+                .enum_values
+                .as_ref()
+                .map(|vs| vs.iter().map(|v| v.name.clone()).collect())
+        } else {
+            None
+        };
+
         nodes.push(VisualNode {
             id: name.clone(),
             label: name.clone(),
@@ -374,6 +663,8 @@ pub fn write_visual_report(
             risk,
             is_root,
             op_type,
+            sample_query,
+            enum_values,
         });
 
         // 2. Create an edge for EVERY field connection (Return Types)
@@ -422,6 +713,7 @@ pub fn write_visual_report(
                                         is_deprecated: false,
                                         args: vec![],
                                         weight: 0.5, // Lighter weight for argument connections
+                                        sample: None,
                                     });
                                 }
                             }
@@ -432,6 +724,17 @@ pub fn write_visual_report(
                         weight += 2.0;
                     }
 
+                    // Root-operation fields get a ready-to-run query template (with seed
+                    // values + auth hints), so the detail panel can show a per-field sample.
+                    let sample = if is_root {
+                        generate_query_template(schema, meta.auth_discovery.as_ref(), name, &f.name, seeds, None)
+                            .get("literal")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+
                     edges.push(VisualEdge {
                         source: name.clone(),
                         target: target_name,
@@ -439,6 +742,7 @@ pub fn write_visual_report(
                         is_deprecated: f.is_deprecated.unwrap_or(false),
                         args: args_info,
                         weight,
+                        sample,
                     });
                 }
             }
@@ -456,6 +760,7 @@ pub fn write_visual_report(
                             is_deprecated: false,
                             args: vec![],
                             weight: 1.0,
+                            sample: None,
                         });
                     }
                 }
@@ -464,7 +769,6 @@ pub fn write_visual_report(
     }
 
     let graph = VisualGraph { nodes, edges };
-    let graph_json = serde_json::to_string(&graph).map_err(|e| e.to_string())?;
 
     let mut finding_details = Vec::new();
     for f in findings {
@@ -505,41 +809,16 @@ pub fn write_visual_report(
             "affected": f.affected.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
             "templates": templates,
             "poc": f.poc,
+            "exploit_guide": crate::audit::poc::sqlmap_guide(f, &meta.source),
         }));
     }
-    let findings_json = serde_json::to_string(&finding_details).map_err(|e| e.to_string())?;
-    let seeds_json = serde_json::to_string(seeds).unwrap_or_else(|_| "[]".to_string());
-    let stats_json = serde_json::to_string(stats).unwrap_or_default();
-    let meta_json = serde_json::to_string(meta).unwrap_or_default();
-
-    // Vendored graph libraries, inlined so the report renders with no network access.
-    // Load order matters: graphology (the graph data structure), then graphology-library
-    // (layout algorithms like ForceAtlas2, built against the graphology global), then
-    // sigma (the WebGL renderer, which renders a graphology graph instance directly).
-    let vendor_js = format!(
-        "<script>{}</script>\n<script>{}</script>\n<script>{}</script>",
-        include_str!("vendor/graphology.umd.min.js"),
-        include_str!("vendor/graphology-library.min.js"),
-        include_str!("vendor/sigma.min.js"),
-    );
-
-    let html = include_str!("visual_template.html")
-        .replace("{{VENDOR_JS}}", &vendor_js)
-        .replace("{{GRAPH_DATA}}", &escape_for_script(&graph_json))
-        .replace("{{FINDINGS_DATA}}", &escape_for_script(&findings_json))
-        .replace("{{SOURCE}}", &escape_for_script(&meta.source))
-        .replace("{{STATS}}", &escape_for_script(&stats_json))
-        .replace("{{META}}", &escape_for_script(&meta_json))
-        .replace("{{SEEDS_DATA}}", &escape_for_script(&seeds_json));
-
-    fs::write(path, html).map_err(|e| format!("Failed to write visual report: {}", e))
-}
-
-/// Escapes a string that will be spliced directly into an inline `<script>` block (or into
-/// an HTML attribute like `{{SOURCE}}`'s usages), preventing a `</script>` (or `{{...}}`
-/// placeholder-shaped) substring inside untrusted data from prematurely closing the tag or
-/// being mistaken for another template token. Replacing `</` with `<\/` is valid inside both
-/// JSON string literals and raw text and does not change the parsed value.
-fn escape_for_script(s: &str) -> String {
-    s.replace("</", "<\\/")
+    serde_json::json!({
+        "graph": graph,
+        "findings": finding_details,
+        "seeds": seeds,
+        "stats": stats,
+        "meta": meta,
+        "source": meta.source,
+        "serverFingerprint": meta.server_fingerprint.as_ref().map(|f| f.label()),
+    })
 }

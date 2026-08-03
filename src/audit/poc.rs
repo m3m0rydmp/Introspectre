@@ -1,6 +1,52 @@
 use crate::types::{AffectedLocation, Finding, GqlSchema};
 use serde_json::json;
 
+/// Injection finding ids that sqlmap can take further (SQL/NoSQL).
+const SQLMAP_TARGET_IDS: &[&str] = &["sql-injection", "sql-injection-inline", "blind-injection"];
+
+/// For a confirmed SQL/NoSQL injection finding, build a ready-to-run **sqlmap**
+/// command tailored to the endpoint and the injectable argument. Introspectre
+/// *confirms* the flaw; sqlmap *exploits/extracts* it — this is the hand-off.
+/// Returns `None` for non-injection findings.
+pub fn sqlmap_guide(finding: &Finding, url: &str) -> Option<String> {
+    if !SQLMAP_TARGET_IDS.contains(&finding.id) {
+        return None;
+    }
+
+    // The injectable argument (leaf) from the first Argument location.
+    let arg = finding.affected.iter().find_map(|loc| match loc {
+        AffectedLocation::Argument(_, _, path) => path.rsplit('.').next().map(|s| s.to_string()),
+        _ => None,
+    });
+    let arg = arg.unwrap_or_else(|| "<arg>".to_string());
+
+    // The confirmed GraphQL operation, collapsed to a single JSON-safe line.
+    let query_line = finding
+        .poc
+        .as_deref()
+        .map(|q| q.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|| "<paste the confirmed query>".to_string());
+    // JSON-escape for embedding inside the --data string.
+    let query_json = query_line.replace('\\', "\\\\").replace('"', "\\\"");
+
+    Some(format!(
+        "# Introspectre confirmed the injection; use sqlmap to exploit / extract data.\n\
+         # Direct (variable-based) — the injectable value `{arg}` is marked with * :\n\
+         sqlmap -u \"{url}\" --batch --method=POST \\\n\
+        \x20 --headers=\"Content-Type: application/json\" \\\n\
+        \x20 --data='{{\"query\":\"{query}\",\"variables\":{{\"{arg}\":\"*\"}}}}' \\\n\
+        \x20 --level=5 --risk=3\n\
+         #\n\
+         # Or via a saved request (covers inlined / nested-input cases): capture the\n\
+         # vulnerable request to req.txt, replace the injectable value with * , then run:\n\
+         #   sqlmap -r req.txt --batch --level=5 --risk=3\n\
+         # If the endpoint needs auth, add:  --cookie=\"...\"  or  -H \"Authorization: Bearer <token>\"",
+        arg = arg,
+        url = url,
+        query = query_json
+    ))
+}
+
 pub fn generate_reproduction_steps(
     finding: &Finding,
     schema: &GqlSchema,

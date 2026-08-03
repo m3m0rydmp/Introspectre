@@ -11,6 +11,11 @@ can only be *yanked* (hidden from new dependents), never deleted.
 - On Windows, build with the MinGW/GNU toolchain on PATH (this repo has no MSVC):
   `$env:Path = "$env:USERPROFILE\mingw64\bin;$env:Path"`.
 
+> **Versioning (SemVer `X.Y.Z`):** new features ⇒ **MINOR (Y)**, bug fixes ⇒ **PATCH (Z)**,
+> breaking changes ⇒ **MAJOR (X)**. Bump **once per release** — the highest-precedence change in
+> the release sets the number (a release that adds any feature is a MINOR even if it also
+> contains fixes; a fixes-only release is a PATCH).
+
 ## Steps
 1. **Bump the version** in `Cargo.toml` (`version = "X.Y.Z"`) following SemVer, and add
    a matching `CHANGELOG.md` section and README version line. The CLI banner reads the
@@ -20,10 +25,13 @@ can only be *yanked* (hidden from new dependents), never deleted.
    ```
    cargo package --list
    ```
-   Expected: `src/**` (including `src/vendor/*.js` and `src/visual_template.html`),
-   `Cargo.toml`, `README.md`, `LICENSE`, and the public docs. **Must NOT contain**
-   `RESEARCH.md`, `PRESENTATION.md`, `NOTES-ENTERPRISE.md`, or `resources/*`
-   (these are covered by `exclude` in `Cargo.toml`).
+   Expected: `src/**` (including the embedded visualizer assets under `src/webui/**`,
+   i.e. `src/webui/index.html`, `app.js`, `app.css`, `guide.js`, and `src/webui/vendor/*.js`),
+   `Cargo.toml`, `README.md`, `LICENSE`, and the public root docs (`USAGE.md`,
+   `ARCHITECTURE.md`, `CHANGELOG.md`). **Must NOT contain** anything under `docs/`
+   (RESEARCH, PRESENTATION, NOTES-ENTERPRISE, ITERATION, AGENT-NOTES, DVGA-TEST-REPORT,
+   ROADMAP, PUBLISHING) or `resources/*` — these are covered by `exclude = ["docs/*", ...]`
+   in `Cargo.toml`.
 3. **Dry-run** the publish (packages + builds from the packaged tree, uploads nothing):
    ```
    cargo publish --dry-run

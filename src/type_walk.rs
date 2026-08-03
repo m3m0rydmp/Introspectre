@@ -21,10 +21,8 @@ use reqwest::Client;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 
-/// Upper bound on reconstructed types, so a huge or adversarial schema cannot
-/// drive the walk into an unbounded request storm. Consistent with the tool's
-/// existing large-schema request budgeting.
-const MAX_TYPES: usize = 1000;
+// The reconstruction cap (default 1000, config `audit.max_type_walk_types`,
+// 0 = unlimited) is passed in by the caller — see `reconstruct_via_type_walk`.
 
 /// Standard built-in scalars that never need a `__type` round-trip.
 const BUILTIN_SCALARS: &[&str] = &["String", "Int", "Float", "Boolean", "ID"];
@@ -150,10 +148,25 @@ async fn discover_query_root(
         .map(String::from)
 }
 
+/// A low-complexity `__type` query: type kind/name and each field's name + return
+/// type (with a short `ofType` chain), plus input-field types. Drops args,
+/// enum values, interfaces, possibleTypes, and descriptions — enough to rebuild
+/// the type graph even on servers that reject the full `FullType` query via a
+/// query **depth/complexity** limit (as DVGA's "Deep Recursion" guard does).
+fn type_query_minimal(name: &str) -> String {
+    format!(
+        "{{ __type(name: \"{name}\") {{ kind name \
+         fields {{ name type {{ kind name ofType {{ kind name }} }} }} \
+         inputFields {{ name type {{ kind name ofType {{ kind name }} }} }} }} }}"
+    )
+}
+
 /// Fetch one type by name, returning the raw `__type` JSON object on success.
-/// Tries a depth-4 reference selection first; if the server rejects it with a
-/// GraphQL error (e.g. an introspection nesting cap), retries once with a
-/// shallow depth-2 selection before giving up on the type.
+/// Tries the full reference selection at depth 4, then depth 2, then a stripped
+/// **minimal** query. It advances to the next (shallower/simpler) attempt on
+/// *either* a GraphQL error (e.g. an introspection nesting/complexity cap) *or* a
+/// transport error (some servers reset the connection on an over-deep query),
+/// only giving up on a type when it's genuinely absent (null with no error).
 async fn fetch_type(
     client: &Client,
     url: &str,
@@ -162,10 +175,11 @@ async fn fetch_type(
     transport: Transport,
     name: &str,
 ) -> Option<Value> {
-    for depth in [4u8, 2u8] {
-        let query = type_query(name, depth);
+    let attempts = [type_query(name, 4), type_query(name, 2), type_query_minimal(name)];
+    let last = attempts.len() - 1;
+    for (i, query) in attempts.iter().enumerate() {
         match post_graphql_ext(
-            client, url, headers, &query, None, rate_limit_ms, 0, transport, false,
+            client, url, headers, query, None, rate_limit_ms, 0, transport, false,
         )
         .await
         {
@@ -175,14 +189,18 @@ async fn fetch_type(
                         return Some(t.clone());
                     }
                 }
-                // `__type` was null or absent. If the server returned no error,
-                // the type genuinely does not exist — stop. Otherwise fall
-                // through to the shallow-depth retry.
-                if resp.errors_text.is_empty() {
+                // `__type` is null/absent. Only conclude the type genuinely does not
+                // exist on the **final** (simplest) attempt with no server error.
+                // Earlier attempts that come back empty may just have been rejected by
+                // a depth/complexity guard (clean GraphQL error) or a swallowed
+                // decode error (empty body) — fall through to the next, simpler query.
+                if resp.errors_text.is_empty() && i == last {
                     return None;
                 }
             }
-            Err(_) => return None,
+            // Transport-level failure (e.g. the server reset the connection on an
+            // over-deep query): try the next, simpler attempt rather than give up.
+            Err(_) => continue,
         }
     }
     None
@@ -201,14 +219,17 @@ pub async fn reconstruct_via_type_walk(
     rate_limit_ms: u64,
     transport: Transport,
     verbose: bool,
+    max_types: usize,
 ) -> Result<GqlSchema, String> {
-    if verbose {
-        // stderr only — stdout must stay clean for `--format json`/`markdown`.
-        eprintln!(
-            "  {} `__schema` blocked — attempting `__type`-walk reconstruction...",
-            "→".blue()
-        );
-    }
+    // 0 = unlimited; otherwise use the configured cap.
+    let cap = if max_types == 0 { usize::MAX } else { max_types };
+
+    // Shown by default (not just under --verbose): the user should always know
+    // introspection fell back to the slower `__type`-walk.
+    crate::progress::persistent(&format!(
+        "  {} `__schema` blocked — attempting `__type`-walk reconstruction...",
+        "→".blue()
+    ));
 
     let query_root =
         discover_query_root(client, url, headers, rate_limit_ms, transport)
@@ -234,9 +255,20 @@ pub async fn reconstruct_via_type_walk(
     let mut capped = false;
 
     while let Some(name) = queue.pop_front() {
-        if types.len() >= MAX_TYPES {
+        if types.len() >= cap {
             capped = true;
             break;
+        }
+
+        if verbose {
+            // Transient: high-frequency live status, overwrites itself in place.
+            crate::progress::transient(&format!(
+                "  {} `__type`-walk: fetching {} ({} types, {} queued)",
+                "→".blue(),
+                name,
+                types.len(),
+                queue.len()
+            ));
         }
 
         let raw = match fetch_type(client, url, headers, rate_limit_ms, transport, &name).await {
@@ -259,16 +291,24 @@ pub async fn reconstruct_via_type_walk(
         types.push(parsed);
     }
 
+    // Erase any lingering transient status line before the caller prints its
+    // persistent summary.
+    crate::progress::clear();
+
     if types.is_empty() {
         return Err("`__type`-walk reconstruction found no types.".to_string());
     }
 
-    if capped && verbose {
-        eprintln!(
-            "  {} `__type`-walk hit the {}-type cap; schema is partial.",
+    // Shown by default: a partial schema is important enough that the user
+    // should always see it (and know the cap is configurable), not only under
+    // --verbose. Cancel and raise `audit.max_type_walk_types` in config (0 =
+    // unlimited) to reconstruct the full schema.
+    if capped {
+        crate::progress::persistent(&format!(
+            "  {} `__type`-walk hit the {}-type cap; schema is PARTIAL. Raise `audit.max_type_walk_types` in your config (0 = unlimited) and re-run to reconstruct more.",
             "!".yellow().bold(),
-            MAX_TYPES
-        );
+            cap
+        ));
     }
 
     let query_type = if resolved.contains(&query_root) {

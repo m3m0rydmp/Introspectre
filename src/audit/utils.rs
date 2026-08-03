@@ -614,8 +614,16 @@ pub fn resolve_complex_default(
         _ => {}
     }
 
+    // Most specific: a seed keyed by the argument/input-field **name** (e.g. `username`,
+    // `password`, `token`, `id`). This lets an operator supply distinct known values for
+    // sibling arguments of the same scalar type — e.g. valid credentials so an auth-gated
+    // sink can be reached — which a type-name seed alone cannot express.
+    if let Some(seeded) = seed_map.get(field_name) {
+        return seeded.clone();
+    }
+
     if let Some(name) = &type_ref.name {
-        // Check seed map first
+        // Then a seed keyed by the type name.
         if let Some(seeded) = seed_map.get(name) {
             return seeded.clone();
         }

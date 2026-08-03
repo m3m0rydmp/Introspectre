@@ -13,7 +13,12 @@ use crate::types::Severity;
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+
+    /// Purge the ENTIRE cache database (all targets, cached scans, and learned seeds)
+    /// after a confirmation prompt. Global maintenance action — no subcommand needed.
+    #[arg(long, default_value_t = false)]
+    pub purge_db: bool,
 
     /// Path to TOML config file
     #[arg(long, global = true)]
@@ -47,14 +52,35 @@ pub struct Cli {
     #[arg(long, global = true, default_value_t = false)]
     pub stealth: bool,
 
+    /// Reuse a browser session by sending a raw Cookie header on every request.
+    /// Paste the cookies from an authenticated/challenge-passed browser session,
+    /// e.g. --cookie "_px3=...; __cf_bm=...". Needed for endpoints behind
+    /// bot-management WAFs (PerimeterX, Cloudflare, Akamai, …).
+    #[arg(long, global = true, value_name = "STRING")]
+    pub cookie: Option<String>,
+
+    /// Clear this target's cached scan before running, forcing a fresh fetch.
+    /// (scan/brute reuse the last cached schema by default to avoid re-requesting.)
+    #[arg(long, global = true, default_value_t = false)]
+    pub purge_cache: bool,
+
+    /// Skip GraphQL server-framework fingerprinting (a few extra recon requests).
+    #[arg(long, global = true, default_value_t = false)]
+    pub no_fingerprint: bool,
+
     /// Use a local schema JSON file for auditing a live URL (when introspection is disabled)
     #[arg(long, global = true, value_name = "FILE")]
     pub use_schema: Option<PathBuf>,
 
-    /// Generate an interactive actionable visualization HTML report.
-    /// Optionally specify the output path (defaults to introspectre-visual.html).
-    #[arg(long, global = true, value_name = "PATH", num_args = 0..=1, default_missing_value = "introspectre-visual.html")]
-    pub visualize: Option<PathBuf>,
+    /// Serve an interactive attack-surface graph on a local web server
+    /// (127.0.0.1 only). Runs in the foreground until Ctrl+C; opens your browser.
+    #[arg(long, global = true, default_value_t = false)]
+    pub visualize: bool,
+
+    /// Preferred port for the --visualize server (default 7878; falls back to a
+    /// free port if busy).
+    #[arg(long, global = true, value_name = "PORT")]
+    pub port: Option<u16>,
 
     /// Path to a traffic file (HAR or Burp XML) to learn valid data values from
     #[arg(long, global = true, value_name = "FILE")]
@@ -88,6 +114,11 @@ pub struct Cli {
     /// Print the probes/payloads that would run, without sending any requests
     #[arg(long, global = true, default_value_t = false)]
     pub dry_run: bool,
+
+    /// Always exit 0, even when High/Medium findings are present. Suppresses the CI
+    /// "findings gate" so interactive or chained runs aren't treated as a failed command.
+    #[arg(long, global = true, default_value_t = false)]
+    pub exit_zero: bool,
 }
 
 #[derive(Subcommand)]
@@ -158,6 +189,19 @@ pub enum Commands {
         #[arg(long, default_value_t = 0)]
         evasion: u8,
 
+        /// Enable the injection-class probes (SQL/NoSQL injection, OS command injection, SSRF, XSS)
+        /// for this run, overriding config. They are off by default because they send
+        /// exploit-style payloads. (Naming any of them in --only also enables them.)
+        #[arg(long, default_value_t = false)]
+        injection: bool,
+
+        /// Auto-chain: on a confirmed SQL injection, attempt to extract credentials
+        /// (best-effort UNION dump of a users table) and feed any recovered username/password
+        /// into later probes as seeds, so auth-gated sinks can be reached without --seeds.
+        /// Aggressive (exfiltrates data); implies --injection.
+        #[arg(long, default_value_t = false)]
+        chain: bool,
+
         /// Enable batching of safe probes (verbose disclosure, unauthenticated access) into single requests
         #[arg(long, default_value_t = false)]
         batch_probes: bool,
@@ -222,6 +266,32 @@ pub enum Commands {
         /// Path to the introspection JSON file
         path: PathBuf,
     },
+
+    /// View or edit tool settings in config.toml
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Set a setting, e.g. `config set audit.max_type_walk_types 5000`
+    Set {
+        /// Dotted key path, e.g. audit.max_type_walk_types
+        key: String,
+        /// New value (parsed as int/bool where possible, else string)
+        value: String,
+    },
+    /// Print a setting's current value, e.g. `config get audit.max_type_walk_types`
+    Get {
+        /// Dotted key path
+        key: String,
+    },
+    /// Print the resolved config file path and its contents
+    Show,
+    /// Print the config file path that would be used
+    Path,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]

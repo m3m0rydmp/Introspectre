@@ -4,14 +4,20 @@ mod guess;
 mod cli;
 mod db;
 mod config;
+mod config_cmd;
+mod fingerprint;
+mod id_scheme;
 mod io_ops;
+mod progress;
 mod report;
 mod report_visual;
+mod serve;
 mod transport;
 mod type_walk;
 mod types;
 mod utils;
 mod traffic;
+mod waf;
 
 use std::path::Path;
 use clap::Parser;
@@ -21,12 +27,66 @@ use cli::{Cli, Commands, OutputFormat};
 use config::AppConfig;
 use io_ops::{
     build_client, discover_auth_requirements, fetch_introspection, load_schema_from_file, probe_graphql_endpoint,
+    FetchError,
 };
 use guess::run_guess;
 use report::{print_json_report, print_markdown_report, print_text_report};
-use report_visual::write_visual_report;
 use transport::Transport;
 use types::ReportMeta;
+
+/// Merge the base `--header` list with session-reuse layers: HAR/Burp session
+/// headers (`--seed-traffic`), same-origin `Origin`/`Referer` (`--stealth`), and
+/// a raw `--cookie`. Base `--header` entries win on a name conflict. Returns
+/// `key=value` strings for the existing header pipeline. This is what lets a
+/// researcher reuse a browser session to get past a bot-management WAF.
+fn effective_headers(base: &[String], cli: &Cli, url: &str) -> Vec<String> {
+    let mut layers: Vec<String> = Vec::new();
+    if let Some(tp) = &cli.seed_traffic {
+        layers.extend(crate::traffic::extract_session_headers(tp, url));
+    }
+    if cli.stealth {
+        layers.extend(crate::io_ops::same_origin_headers(url));
+    }
+    if let Some(c) = &cli.cookie {
+        layers.push(format!("Cookie={}", c));
+    }
+    layers.extend(base.iter().cloned());
+    // Dedupe by header name (case-insensitive); later layers (higher priority) win.
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for h in layers {
+        let key = h.splitn(2, '=').next().unwrap_or("").trim().to_ascii_lowercase();
+        if !key.is_empty() {
+            map.insert(key, h);
+        }
+    }
+    map.into_values().collect()
+}
+
+/// Report an introspection failure honestly and exit. A bot-management wall is
+/// distinguished from a genuinely disabled introspection surface, so the tool
+/// stops recommending `brute` (which hits the same wall) when the real cause is
+/// a WAF challenge.
+fn fail_fetch(e: FetchError) -> ! {
+    match e {
+        FetchError::Blocked { vendor, hint } => {
+            eprintln!(
+                "{} Endpoint is behind {} bot management (HTTP challenge) — requests are blocked before reaching GraphQL, so this is not an introspection setting.",
+                "  !".yellow().bold(),
+                vendor
+            );
+            eprintln!("  {} {}", "→".blue(), hint);
+        }
+        FetchError::Introspection(msg) => {
+            eprintln!("{} {}", "  !".yellow().bold(), msg);
+            eprintln!(
+                "  {} Introspection is disabled or blocked. Try the {} command to reconstruct the schema blindly.",
+                "→".blue(),
+                "brute".bright_white().bold()
+            );
+        }
+    }
+    std::process::exit(1);
+}
 
 fn print_banner(version: &str) {
     let banner = format!(
@@ -45,13 +105,40 @@ fn print_banner(version: &str) {
         "introspectre".bright_black(),
         version.bright_cyan(),
         "—".bright_black(),
-        "GraphQL Offensive Security Engine".bright_black()
+        "GraphQL Offensive Security Tool".bright_black()
     );
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Global maintenance action: wipe the entire cache database. Runs with no subcommand,
+    // behind a confirmation prompt.
+    if cli.purge_db {
+        std::process::exit(run_purge_db());
+    }
+
+    // `config` is a local, no-network maintenance command — handle it before the
+    // banner and any config/schema work, then exit.
+    if let Some(Commands::Config { action }) = &cli.command {
+        std::process::exit(config_cmd::run(action, cli.config.as_deref()));
+    }
+
+    // Every other flow needs a subcommand. Bind by reference so `cli` stays whole (it's
+    // still borrowed elsewhere, e.g. `effective_headers(&cli, …)`).
+    let command = match cli.command.as_ref() {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "{} a subcommand is required (scan, audit, brute, file, config), or use {} to wipe the cache database. See {} for usage.",
+                "  ✗ Error:".red().bold(),
+                "--purge-db".bright_white(),
+                "--help".bright_white(),
+            );
+            std::process::exit(2);
+        }
+    };
 
     if cli.format == OutputFormat::Text {
         print_banner(env!("CARGO_PKG_VERSION"));
@@ -104,23 +191,27 @@ async fn main() {
     }
 
     let mut meta = ReportMeta {
-        source: match &cli.command {
+        source: match command {
             Commands::Scan { url, .. } => url.clone(),
             Commands::Audit { url, .. } => url.clone(),
             Commands::Brute { url, .. } => url.clone(),
             Commands::File { path } => path.display().to_string(),
+            Commands::Config { .. } => unreachable!("config handled before this point"),
         },
-        offline: matches!(&cli.command, Commands::File { .. }),
-        static_only: match &cli.command {
+        offline: matches!(command, Commands::File { .. }),
+        static_only: match command {
             Commands::Scan { static_only, .. } => *static_only,
             _ => false,
         },
+        reconstructed: matches!(command, Commands::Brute { .. }),
         auth_discovery_performed: false,
         auth_discovery: None,
+        server_fingerprint: None,
     };
 
-    if let Commands::Scan { url, headers, timeout, rate_limit_ms, probe_only: true, .. } = &cli.command {
-        match io_ops::probe_graphql_endpoint(url, headers, *timeout, *rate_limit_ms, cli.token.as_deref(), cli.user_agent.as_deref(), cli.stealth, cli.transport).await {
+    if let Commands::Scan { url, headers, timeout, rate_limit_ms, probe_only: true, .. } = command {
+        let eff = effective_headers(headers, &cli, url);
+        match io_ops::probe_graphql_endpoint(url, &eff, *timeout, *rate_limit_ms, cli.token.as_deref(), cli.user_agent.as_deref(), cli.stealth, cli.transport).await {
             Ok(p) => {
                 if cli.format == OutputFormat::Text {
                     let icon = if p.graphql_confirmed { "✓".green().bold() } else { "!".yellow().bold() };
@@ -145,7 +236,63 @@ async fn main() {
         cli.transport
     };
 
-    let schema = if let Some(schema_path) = &cli.use_schema {
+    // --- Cache handling (before any network schema acquisition) ---
+    // scan (passive) and brute reuse the last cached schema for a target by
+    // default, so a re-run (e.g. after forgetting --visualize) regenerates the
+    // report without another round of requests. --purge-cache clears it first.
+    // Live operations (scan --static-only false, audit) always fetch fresh.
+    let mut from_cache = false;
+    let mut cached_schema: Option<crate::types::GqlSchema> = None;
+    if cli.use_schema.is_none() {
+        let target_url = match command {
+            Commands::Scan { url, .. } | Commands::Brute { url, .. } => Some(url.clone()),
+            _ => None,
+        };
+        let cache_eligible = matches!(command, Commands::Brute { .. })
+            || matches!(command, Commands::Scan { static_only: true, .. });
+        if let Some(url) = target_url {
+            let db_path = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join("introspectre.db");
+            if let Ok(db) = crate::db::ProjectDatabase::new(&db_path) {
+                let project_name = url_to_project_name(&url);
+                if let Ok(project_id) = db.get_or_create_project(&project_name, &url) {
+                    if cli.purge_cache {
+                        if let Ok(n) = db.purge_project_scans(project_id) {
+                            eprintln!("  {} Purged {} cached scan(s) for {}.", "→".blue(), n, project_name);
+                        }
+                    } else if cache_eligible {
+                        if let Ok(Some((schema_json, ts, fp_json))) = db.get_latest_scan(project_id) {
+                            if let Ok(s) = serde_json::from_str::<crate::types::GqlSchema>(&schema_json) {
+                                eprintln!(
+                                    "  {} Using cached scan from {} — run with {} to refetch.",
+                                    "→".blue(),
+                                    ts.bright_white(),
+                                    "--purge-cache".bright_white()
+                                );
+                                cached_schema = Some(s);
+                                from_cache = true;
+                                // Replay the cached server fingerprint (no network) so cached
+                                // runs still show it.
+                                if let Some(fj) = fp_json {
+                                    if let Ok(fpr) =
+                                        serde_json::from_str::<crate::fingerprint::ServerFingerprint>(&fj)
+                                    {
+                                        eprintln!("  {} Server: {}", "→".blue(), fpr.label().bright_white());
+                                        meta.server_fingerprint = Some(fpr);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let schema = if let Some(s) = cached_schema {
+        s
+    } else if let Some(schema_path) = &cli.use_schema {
         match load_schema_from_file(schema_path) {
             Ok(s) => s,
             Err(e) => {
@@ -154,7 +301,7 @@ async fn main() {
             }
         }
     } else {
-        match &cli.command {
+        match command {
             Commands::File { path } => match load_schema_from_file(path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -170,13 +317,14 @@ async fn main() {
                 rate_limit_ms,
                 ..
             } => {
+                let eff = effective_headers(headers, &cli, url);
                 if *probe_first {
                     if cli.verbose {
                         println!("  {} Probing endpoint behavior with minimal __typename query...", "→".blue());
                     }
                     let probe = probe_graphql_endpoint(
                         url,
-                        headers,
+                        &eff,
                         *timeout,
                         *rate_limit_ms,
                         cli.token.as_deref(),
@@ -215,26 +363,20 @@ async fn main() {
                 }
                 match fetch_introspection(
                     url,
-                    headers,
+                    &eff,
                     *timeout,
                     *rate_limit_ms,
                     cli.token.as_deref(),
                     cli.user_agent.as_deref(),
                     cli.stealth,
                     resolved_transport,
+                    cli.verbose,
+                    config.audit.max_type_walk_types,
                 )
                 .await
                 {
                     Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("{} {}", "  !".yellow().bold(), e);
-                        eprintln!(
-                            "  {} Introspection is disabled or blocked. Try the {} command to reconstruct the schema blindly.",
-                            "→".blue(),
-                            "brute".bright_white().bold()
-                        );
-                        std::process::exit(1);
-                    }
+                    Err(e) => fail_fetch(e),
                 }
             }
             Commands::Audit {
@@ -244,30 +386,53 @@ async fn main() {
                 rate_limit_ms,
                 ..
             } => {
+                let eff = effective_headers(headers, &cli, url);
                 if cli.verbose {
                     println!("  {} Fetching introspection from {}...", "→".blue(), url);
                 }
                 match fetch_introspection(
                     url,
-                    headers,
+                    &eff,
                     *timeout,
                     *rate_limit_ms,
                     cli.token.as_deref(),
                     cli.user_agent.as_deref(),
                     cli.stealth,
                     resolved_transport,
+                    cli.verbose,
+                    config.audit.max_type_walk_types,
                 )
                 .await
                 {
                     Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("{} {}", "  !".yellow().bold(), e);
+                    // Introspection blocked/disabled: rather than abort the whole audit, continue
+                    // with an empty schema so the network / schema-independent probes still run
+                    // (CSRF, introspection matrix, __typename, CORS, APQ). The schema-dependent
+                    // fan-out probes just have no targets. A hard bot-wall is still fatal.
+                    Err(FetchError::Blocked { vendor, hint }) => {
                         eprintln!(
-                            "  {} Introspection is disabled or blocked. Try the {} command to reconstruct the schema blindly.",
-                            "→".blue(),
-                            "brute".bright_white().bold()
+                            "{} Endpoint is behind {} bot management (HTTP challenge) — requests are blocked before reaching GraphQL.",
+                            "  !".yellow().bold(),
+                            vendor
                         );
+                        eprintln!("  {} {}", "→".blue(), hint);
                         std::process::exit(1);
+                    }
+                    Err(FetchError::Introspection(msg)) => {
+                        eprintln!("{} {}", "  !".yellow().bold(), msg);
+                        eprintln!(
+                            "  {} Schema unavailable — running schema-independent probes only. For full coverage, reconstruct with {} or pass {}.",
+                            "→".blue(),
+                            "brute".bright_white().bold(),
+                            "--use-schema <file>".bright_white()
+                        );
+                        types::GqlSchema {
+                            query_type: None,
+                            mutation_type: None,
+                            subscription_type: None,
+                            directives: None,
+                            types: Vec::new(),
+                        }
                     }
                 }
             }
@@ -287,10 +452,21 @@ async fn main() {
                         Err(e) => { eprintln!("{} Failed to read wordlist: {}", "  ✗".red().bold(), e); std::process::exit(1); }
                     }
                 } else {
-                    let cfg = config.all_words();
-                    if cfg.is_empty() { default_brute_wordlist() } else { cfg }
+                    // Union of the curated built-in list + config-derived security
+                    // terms (deduped). Previously the built-in was unreachable because
+                    // config.all_words() always appends common words (never empty).
+                    let mut seen = std::collections::HashSet::new();
+                    default_brute_wordlist()
+                        .into_iter()
+                        .chain(config.all_words())
+                        .filter(|w| seen.insert(w.clone()))
+                        .collect()
                 };
-                let parsed_headers = crate::utils::parse_extra_headers(headers);
+                if cli.verbose {
+                    eprintln!("  {} brute: {} candidate field name(s) to probe.", "→".blue(), wordlist.len());
+                }
+                let eff = effective_headers(headers, &cli, url);
+                let parsed_headers = crate::utils::parse_extra_headers(&eff);
                 match run_guess(url, &client, &parsed_headers, &wordlist, *concurrency, *dynamic_throttling, *rate_limit_ms, cli.verbose).await {
                     Ok(s) => s,
                     Err(ce) => {
@@ -299,6 +475,7 @@ async fn main() {
                     }
                 }
             }
+            Commands::Config { .. } => unreachable!("config handled before this point"),
         }
     };
 
@@ -309,9 +486,9 @@ async fn main() {
         rate_limit_ms,
         discover_auth,
         ..
-    } = &cli.command
+    } = command
     {
-        if *discover_auth {
+        if *discover_auth && !from_cache {
             if cli.verbose {
                 println!(
                     "  {} Discovering auth guards with unauthenticated knock probes...",
@@ -319,10 +496,11 @@ async fn main() {
                 );
             }
             meta.auth_discovery_performed = true;
+            let eff = effective_headers(headers, &cli, url);
             match discover_auth_requirements(
                 &schema,
                 url,
-                headers,
+                &eff,
                 *timeout,
                 *rate_limit_ms,
                 cli.user_agent.as_deref(),
@@ -333,6 +511,36 @@ async fn main() {
             {
                 Ok(auth) => meta.auth_discovery = Some(auth),
                 Err(e) => if cli.verbose { eprintln!("  {} Auth discovery failed: {}", "!".yellow().bold(), e) },
+            }
+        }
+    }
+
+    // --- Server framework fingerprinting (graphw00f-style, always-on) ---
+    // A couple of benign recon probes to identify the GraphQL server stack.
+    // Skipped for offline (`file`), cache-served runs, and `--no-fingerprint`.
+    if !cli.no_fingerprint && !from_cache {
+        let fp_target = match command {
+            Commands::Scan { url, headers, timeout, rate_limit_ms, .. }
+            | Commands::Audit { url, headers, timeout, rate_limit_ms, .. }
+            | Commands::Brute { url, headers, timeout, rate_limit_ms, .. } => {
+                Some((url, headers, *timeout, *rate_limit_ms))
+            }
+            _ => None,
+        };
+        if let Some((url, headers, timeout, rate_limit_ms)) = fp_target {
+            if let Ok(client) = build_client(timeout, cli.user_agent.as_deref(), cli.stealth) {
+                let eff = effective_headers(headers, &cli, url);
+                let mut fp_headers = crate::utils::parse_extra_headers(&eff);
+                if let Some(t) = &cli.token {
+                    fp_headers.push(("Authorization".to_string(), format!("Bearer {}", t)));
+                }
+                if let Some(fpr) =
+                    crate::fingerprint::detect_server(url, &client, &fp_headers, resolved_transport, rate_limit_ms, Some(&schema)).await
+                {
+                    // stderr (not stdout) so `--format json`/`markdown` stay clean.
+                    eprintln!("  {} Server: {}", "→".blue(), fpr.label().bright_white());
+                    meta.server_fingerprint = Some(fpr);
+                }
             }
         }
     }
@@ -348,12 +556,16 @@ async fn main() {
             let project_name = url_to_project_name(&meta.source);
             match db.get_or_create_project(&project_name, &meta.source) {
                 Ok(project_id) => {
-                    // Save Scan
-                    let schema_json = serde_json::to_string(&schema).unwrap_or_default();
-                    let findings_json = serde_json::to_string(&findings).unwrap_or_default();
-                    let stats_json = serde_json::to_string(&stats).unwrap_or_default();
-                    if let Err(e) = db.save_scan(project_id, &schema_json, &findings_json, &stats_json) {
-                         if cli.verbose { eprintln!("  {} Failed to save scan to database: {}", "!".yellow().bold(), e); }
+                    // Save Scan (skip when we just served this schema from cache,
+                    // to avoid piling up duplicate rows).
+                    if !from_cache {
+                        let schema_json = serde_json::to_string(&schema).unwrap_or_default();
+                        let findings_json = serde_json::to_string(&findings).unwrap_or_default();
+                        let stats_json = serde_json::to_string(&stats).unwrap_or_default();
+                        let fp_json = meta.server_fingerprint.as_ref().and_then(|f| serde_json::to_string(f).ok());
+                        if let Err(e) = db.save_scan(project_id, &schema_json, &findings_json, &stats_json, fp_json.as_deref()) {
+                             if cli.verbose { eprintln!("  {} Failed to save scan to database: {}", "!".yellow().bold(), e); }
+                        }
                     }
 
                     // Process Seed Traffic
@@ -407,13 +619,14 @@ async fn main() {
         dynamic_throttling,
         static_only,
         ..
-    } = &cli.command
+    } = command
     {
         if !*static_only {
+            let eff = effective_headers(headers, &cli, url);
             let mut audit_report = match crate::audit::run_audit(
                 &schema,
                 url,
-                headers,
+                &eff,
                 *timeout,
                 *rate_limit_ms,
                 *dynamic_throttling,
@@ -433,6 +646,8 @@ async fn main() {
                 config.audit.max_targets_per_probe, // config default (auto-cap if None)
                 config.audit.max_total_requests,
                 cli.dry_run,
+                cli.verbose,
+                false, // scan --static-only false does not auto-chain
             )
             .await
             {
@@ -442,6 +657,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            audit_report.server_fingerprint = meta.server_fingerprint.clone();
 
             if let Some(min) = &cli.min_severity {
                 audit_report.confirmed.retain(|f| f.severity >= *min);
@@ -472,18 +688,28 @@ async fn main() {
         rate_limit_ms,
         dynamic_throttling,
         evasion,
+        injection,
+        chain,
         batch_probes,
         batch_size,
         idor_payloads,
         focus,
         max_targets,
         max_requests,
-    } = &cli.command
+    } = command
     {
+        // `--injection` (or naming an injection probe in `--only`) enables the injection-class
+        // probes for this run, overriding the config default (which keeps them off).
+        // `--chain` implies injection (it needs a confirmed SQLi to harvest from).
+        let injection_ids = ["sql-injection", "os-command-injection", "ssrf", "xss"];
+        if *injection || *chain || cli.only.iter().any(|o| injection_ids.contains(&o.as_str())) {
+            config.audit.test_injection = true;
+        }
+        let eff = effective_headers(headers, &cli, url);
         let mut audit_report = match crate::audit::run_audit(
             &schema,
             url,
-            headers,
+            &eff,
             *timeout,
             *rate_limit_ms,
             *dynamic_throttling,
@@ -503,6 +729,8 @@ async fn main() {
             (*max_targets).or(config.audit.max_targets_per_probe),
             (*max_requests).or(config.audit.max_total_requests),
             cli.dry_run,
+            cli.verbose,
+            *chain,
         )
         .await
         {
@@ -512,6 +740,7 @@ async fn main() {
                 std::process::exit(1);
             }
         };
+        audit_report.server_fingerprint = meta.server_fingerprint.clone();
 
         if let Some(min) = &cli.min_severity {
             audit_report.confirmed.retain(|f| f.severity >= *min);
@@ -545,8 +774,11 @@ async fn main() {
     visual_findings.extend(active_confirmed);
 
     // --- Final Reporting ---
-    match cli.command {
-        Commands::Scan { .. } | Commands::File { .. } => {
+    // `brute` reconstructs a (partial) schema blindly; report it like scan/file so the
+    // discovered fields and the passive analysis are actually shown (previously brute
+    // printed nothing at default verbosity).
+    match command {
+        Commands::Scan { .. } | Commands::File { .. } | Commands::Brute { .. } => {
              match cli.format {
                 OutputFormat::Text => {
                     print_text_report(&schema, &stats, &visual_findings, &meta, cli.max_affected, cli.verbose)
@@ -560,25 +792,102 @@ async fn main() {
         _ => {}
     }
 
-    if let Some(visual_path) = &cli.visualize {
-        if let Err(e) = write_visual_report(visual_path, &schema, &visual_findings, &meta, &stats, &learned_seeds) {
+    if cli.visualize {
+        // Launch the interactive visualizer web server. This blocks in the
+        // foreground until the user presses Ctrl+C, then the process exits.
+        let viz_db_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("introspectre.db");
+        if let Err(e) = serve::serve_visualizer(
+            &schema,
+            &visual_findings,
+            &meta,
+            &stats,
+            &learned_seeds,
+            cli.port,
+            viz_db_path,
+            config.patterns.clone(),
+        )
+        .await
+        {
             eprintln!("{} {}", "  ✗ Error:".red().bold(), e);
             std::process::exit(1);
         }
-        if cli.format == OutputFormat::Text {
-            eprintln!(
-                "  {} Interactive visualization written to {}",
-                "✓".green().bold(),
-                visual_path.display().to_string().bright_white()
-            );
-        }
+        return;
     }
 
-    if visual_findings
-        .iter()
-        .any(|f| f.severity == crate::types::Severity::High || f.severity == crate::types::Severity::Medium)
+    // CI "findings gate": exit non-zero when High/Medium findings are present, unless the
+    // user opted out with --exit-zero (interactive / chained use).
+    if !cli.exit_zero
+        && visual_findings
+            .iter()
+            .any(|f| f.severity == crate::types::Severity::High || f.severity == crate::types::Severity::Medium)
     {
         std::process::exit(1);
+    }
+}
+
+/// Wipe the entire cache database (`--purge-db`) after a prominent confirmation prompt.
+/// Returns the process exit code. Non-interactive/piped input that isn't exactly `yes` aborts
+/// safely, so this can never fire unattended.
+fn run_purge_db() -> i32 {
+    use std::io::Write;
+
+    let db_path = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("introspectre.db");
+
+    if !db_path.exists() {
+        eprintln!("  {} No cache database at {} — nothing to purge.", "→".blue(), db_path.display());
+        return 0;
+    }
+
+    let db = match crate::db::ProjectDatabase::new(&db_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("  {} Could not open {}: {}", "✗".red().bold(), db_path.display(), e);
+            return 1;
+        }
+    };
+
+    let (projects, scans, seeds) = db.counts().unwrap_or((0, 0, 0));
+    if projects == 0 && scans == 0 && seeds == 0 {
+        eprintln!("  {} Cache database is already empty.", "→".blue());
+        return 0;
+    }
+
+    eprintln!();
+    eprintln!("  {}", "⚠  DESTRUCTIVE — purge the ENTIRE Introspectre cache database".red().bold());
+    eprintln!("     {}", db_path.display().to_string().bright_white());
+    eprintln!(
+        "     Permanently deletes {} target(s), {} cached scan(s), and {} learned seed(s).",
+        projects.to_string().bright_white(),
+        scans.to_string().bright_white(),
+        seeds.to_string().bright_white(),
+    );
+    eprintln!("     {}", "This cannot be undone.".dimmed());
+    eprint!("  Type {} to proceed (anything else aborts): ", "yes".bright_white().bold());
+    let _ = std::io::stderr().flush();
+
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() || input.trim().to_lowercase() != "yes" {
+        eprintln!("  {}", "Aborted — no changes made.".yellow());
+        return 0;
+    }
+
+    match db.reset_all() {
+        Ok(()) => {
+            eprintln!(
+                "  {} Purged the cache database ({} scan(s), {} seed(s), {} target(s) removed).",
+                "✓".green().bold(),
+                scans, seeds, projects
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("  {} Failed to purge: {}", "✗".red().bold(), e);
+            1
+        }
     }
 }
 
@@ -592,11 +901,92 @@ fn url_to_project_name(url: &str) -> String {
 }
 
 fn default_brute_wordlist() -> Vec<String> {
-    vec![
-        "me", "users", "admin", "config", "settings", "login", "auth", "profile",
-        "accounts", "nodes", "items", "search", "version", "health", "status",
-        "debug", "internal", "root", "api", "v1", "v2", "db", "database",
-        "file", "files", "upload", "download", "token", "tokens", "key", "keys",
-        "secrets", "credentials", "passwords", "emails", "clients", "customers"
-    ].into_iter().map(|s| s.to_string()).collect()
+    // A broad set of common GraphQL root-field names (Relay/graphql-ruby/Apollo
+    // conventions, singular + plural). Deduplicated before use.
+    let words = [
+        // Viewer / identity
+        "me", "viewer", "currentUser", "user", "users", "account", "accounts",
+        "profile", "profiles", "session", "sessions", "identity", "whoami",
+        // Relay
+        "node", "nodes", "edges", "pageInfo",
+        // Org / team / membership
+        "organization", "organizations", "org", "orgs", "team", "teams",
+        "member", "members", "membership", "memberships", "group", "groups",
+        "role", "roles", "permission", "permissions", "invite", "invites",
+        // Content / social
+        "post", "posts", "comment", "comments", "message", "messages",
+        "notification", "notifications", "feed", "activity", "activities",
+        "tag", "tags", "category", "categories", "media", "asset", "assets",
+        "image", "images", "video", "videos", "attachment", "attachments",
+        // Commerce
+        "order", "orders", "product", "products", "cart", "checkout",
+        "payment", "payments", "invoice", "invoices", "subscription",
+        "subscriptions", "plan", "plans", "price", "prices", "coupon",
+        "coupons", "discount", "refund", "refunds", "transaction",
+        "transactions", "wallet", "wallets", "balance", "card", "cards",
+        // Projects / dev
+        "project", "projects", "repository", "repositories", "repo", "repos",
+        "issue", "issues", "pullRequest", "pullRequests", "commit", "commits",
+        "branch", "branches", "release", "releases", "pipeline", "pipelines",
+        "deployment", "deployments", "environment", "environments", "workflow",
+        // Secrets / auth surface
+        "apiKey", "apiKeys", "token", "tokens", "accessToken", "refreshToken",
+        "key", "keys", "secret", "secrets", "credential", "credentials",
+        "password", "passwords", "email", "emails", "phone", "webhook", "webhooks",
+        "integration", "integrations", "connection", "connections",
+        // Admin / internal / infra
+        "admin", "internal", "debug", "root", "config", "configuration",
+        "settings", "setting", "feature", "features", "featureFlag",
+        "featureFlags", "flag", "flags", "audit", "auditLog", "auditLogs",
+        "log", "logs", "metric", "metrics", "report", "reports", "export",
+        "import", "job", "jobs", "task", "tasks", "queue", "event", "events",
+        // Meta / infra
+        "search", "version", "health", "status", "ping", "info", "meta",
+        "schema", "api", "v1", "v2", "graphql", "db", "database",
+        "file", "files", "upload", "download", "document", "documents",
+        // People / CRM
+        "client", "clients", "customer", "customers", "contact", "contacts",
+        "lead", "leads", "company", "companies", "address", "addresses",
+        "location", "locations", "country", "countries", "currency", "currencies",
+        // Relay connection internals
+        "cursor", "hasNextPage", "hasPreviousPage", "startCursor", "endCursor",
+        "clientMutationId", "totalCount", "connection", "connections",
+        // Prisma / Nexus-style roots
+        "findMany", "findFirst", "findUnique", "findOne", "aggregate", "groupBy", "upsert",
+        // Gaming / domain
+        "game", "games", "app", "apps", "appId", "gameId", "packageId",
+        "item", "items", "inventory", "trade", "trades", "tradeOffer",
+        "market", "marketHashName", "asset", "assets", "assetId",
+        "achievement", "achievements", "friend", "friends", "friendList",
+        "leaderboard", "leaderboards", "score", "scores", "rank", "level",
+        "badge", "badges", "stat", "stats", "match", "matches", "lobby",
+        "server", "servers", "steamId", "accountId", "persona", "avatar",
+        "playtime", "ban", "bans", "player", "players", "character", "characters",
+        "quest", "quests", "reward", "rewards", "loadout", "skin", "skins",
+        // Auth / lifecycle
+        "signIn", "signUp", "signOut", "logout", "login", "register",
+        "verify", "verification", "refresh", "authorize", "consent",
+        // Content / social extras
+        "like", "likes", "favorite", "favorites", "bookmark", "bookmarks",
+        "follower", "followers", "following", "subscriber", "subscribers",
+        "reaction", "reactions", "vote", "votes", "poll", "polls",
+        "survey", "surveys", "ticket", "tickets", "thread", "threads",
+        "channel", "channels", "room", "rooms", "conversation", "conversations",
+        "draft", "drafts", "template", "templates", "form", "forms",
+        "reply", "replies", "mention", "mentions", "hashtag", "hashtags",
+        // Entities / infra extras
+        "entity", "entities", "resource", "resources", "collection", "collections",
+        "catalog", "catalogs", "preference", "preferences", "policy", "policies",
+        "gdpr", "kyc", "review", "reviews", "rating", "ratings",
+        "shipment", "shipments", "shipping", "tax", "taxes",
+        "warehouse", "stock", "sku", "variant", "variants", "bundle", "bundles",
+        "namespace", "namespaces", "tenant", "tenants", "workspace", "workspaces",
+        "dashboard", "dashboards", "widget", "widgets", "chart", "charts",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    words
+        .into_iter()
+        .filter(|w| seen.insert(*w))
+        .map(|s| s.to_string())
+        .collect()
 }

@@ -466,6 +466,12 @@ pub struct ReportMeta {
     pub source: String,
     pub offline: bool,
     pub static_only: bool,
+    /// True when the schema was blindly reconstructed (the `brute` command) rather than
+    /// introspected — used to label the report mode accurately.
+    #[serde(default)]
+    pub reconstructed: bool,
     pub auth_discovery_performed: bool,
     pub auth_discovery: Option<AuthDiscoveryResult>,
+    /// Detected GraphQL server framework (graphw00f-style), when identified.
+    pub server_fingerprint: Option<crate::fingerprint::ServerFingerprint>,
 }

@@ -1,3 +1,4 @@
+pub mod chain;
 pub mod probes;
 pub mod utils;
 pub mod poc;
@@ -6,12 +7,14 @@ pub mod targets;
 use crate::audit::probes::{
     probe_alias_dos, probe_batching, probe_complexity, probe_idor, probe_ssrf, probe_typename,
     probe_unauth_access, probe_verbose_error_disclosure, probe_sqli, probe_xss, probe_command_injection, probe_mutation_privesc,
-    probe_engine_fingerprint, probe_csrf_methods, probe_dos_expansion,
-    probe_introspection_matrix, probe_cors, probe_apq, probe_alias_cap,
+    probe_csrf_methods, probe_dos_expansion,
+    probe_introspection_matrix, probe_cors, probe_apq, probe_alias_cap, probe_node_idor,
 };
 use crate::config::AppConfig;
 use crate::transport::Transport;
-use crate::types::{Finding, GqlSchema};
+use crate::types::{
+    AffectedLocation, Confidence, EvidenceLevel, Finding, FindingStatus, GqlSchema, Severity,
+};
 use colored::Colorize;
 use serde::Serialize;
 
@@ -22,6 +25,9 @@ pub struct AuditReport {
     pub confirmed: Vec<Finding>,
     pub unconfirmed: Vec<Finding>,
     pub warnings: Vec<String>,
+    /// Detected GraphQL server framework (set by the caller from `ReportMeta`).
+    #[serde(default)]
+    pub server_fingerprint: Option<crate::fingerprint::ServerFingerprint>,
 }
 
 /// DoS-class probe ids, gated together by `--no-dos`.
@@ -40,7 +46,7 @@ const SQLI_BASE_PAYLOADS: usize = 17;
 /// Whether a probe with the given stable id should run, per `--only`, `--skip`,
 /// and `--no-dos`. Matching is case-insensitive and trims whitespace so
 /// comma-separated CLI values are forgiving of stray spaces.
-fn probe_enabled(id: &str, only: &[String], skip: &[String], no_dos: bool) -> bool {
+fn probe_enabled(id: &str, only: &[String], skip: &[String], no_dos: bool, verbose: bool) -> bool {
     let norm = |s: &str| s.trim().to_lowercase();
     let id_norm = norm(id);
 
@@ -53,7 +59,30 @@ fn probe_enabled(id: &str, only: &[String], skip: &[String], no_dos: bool) -> bo
     if no_dos && DOS_CLASS_PROBE_IDS.contains(&id_norm.as_str()) {
         return false;
     }
+    if verbose {
+        // Transient live status: which probe is running now (overwrites in place).
+        crate::progress::transient(&format!("  {} audit: running {} probe...", "→".blue(), id));
+    }
     true
+}
+
+/// Under `--verbose`, surface any confirmed findings added since `already` as
+/// persistent lines (so the tester sees hits live during the run, not only in
+/// the final summary). Returns the new confirmed count. All output is stderr.
+fn report_new_confirmed(confirmed: &[Finding], already: usize, verbose: bool) -> usize {
+    if verbose && confirmed.len() > already {
+        for f in &confirmed[already..] {
+            let where_ = f.affected.first().map(|a| a.to_string()).unwrap_or_default();
+            crate::progress::persistent(&format!(
+                "  {} FOUND: {} [{}]{}",
+                "✓".green().bold(),
+                f.title,
+                f.id,
+                if where_.is_empty() { String::new() } else { format!(" — {}", where_) }
+            ));
+        }
+    }
+    confirmed.len()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -80,18 +109,24 @@ pub async fn run_audit(
     max_targets: Option<usize>,
     max_requests: Option<usize>,
     dry_run: bool,
+    verbose: bool,
+    chain: bool,
 ) -> Result<AuditReport, String> {
+    // Own a mutable copy of the config so the auto-chain step can inject harvested
+    // credentials into `audit.seeds` mid-run (before the probes that consume them).
+    let mut config = config.clone();
+
     // Every probe this audit could run, paired with whether config already
     // enables it. Used for both the dry-run preview and (combined with
     // `probe_enabled`) the actual gating below.
     let probe_defs: [(&str, bool); 19] = [
         ("typename", true),
-        ("fingerprint", true),
         ("csrf", true),
         ("introspection-matrix", true),
         ("cors", true),
         ("apq", true),
         ("alias-cap", true),
+        ("node-idor", true),
         ("error-disclosure", true),
         ("unauth", config.audit.test_unauth),
         ("idor", config.audit.test_idor),
@@ -178,7 +213,7 @@ pub async fn run_audit(
         let mut would_run = 0usize;
         let mut total_est = 0usize;
         for (id, cfg_enabled) in probe_defs.iter() {
-            if *cfg_enabled && probe_enabled(id, only, skip, no_dos) {
+            if *cfg_enabled && probe_enabled(id, only, skip, no_dos, verbose) {
                 would_run += 1;
                 match estimate(id) {
                     Some(n) => {
@@ -201,6 +236,17 @@ pub async fn run_audit(
             }
         }
 
+        // Make config-disabled probes visible instead of silently omitting them.
+        let disabled: Vec<&str> = probe_defs.iter().filter(|(_, en)| !*en).map(|(id, _)| *id).collect();
+        if !disabled.is_empty() {
+            println!(
+                "  {} disabled by config: {} {}",
+                "•".yellow(),
+                disabled.join(", ").yellow(),
+                "(injection probes: enable with --injection)".bright_black()
+            );
+        }
+
         let secs = (total_est as u64).saturating_mul(rate_limit_ms) / 1000;
         println!();
         println!(
@@ -220,12 +266,15 @@ pub async fn run_audit(
             confirmed: Vec::new(),
             unconfirmed: Vec::new(),
             warnings: vec!["Dry run: no probes were executed and no requests were sent.".to_string()],
+            server_fingerprint: None,
         });
     }
 
     let client = crate::io_ops::build_client(timeout_secs, user_agent, stealth)?;
     let mut confirmed: Vec<Finding> = Vec::new();
     let mut unconfirmed: Vec<Finding> = Vec::new();
+    // Count of confirmed findings already surfaced live (for --verbose found-output).
+    let mut reported = 0usize;
     let mut warnings: Vec<String> = Vec::new();
 
     // Scope + request budget shared by the fan-out probes (unauth, mutation-privesc, sqli,
@@ -237,6 +286,19 @@ pub async fn run_audit(
         sev_index: &sev_index,
         scope: &scope,
         budget: &budget,
+    };
+
+    // Fair-share the global `--max-requests` budget across the fan-out probes so an early probe
+    // can't drain it before later ones run (e.g. sql-injection starving os-command-injection).
+    // Each fan-out probe gets an equal slice; unused slack still falls back to the global cap.
+    let fanout_ids = ["unauth", "mutation-privesc", "sql-injection", "os-command-injection", "xss"];
+    let fanout_enabled = probe_defs
+        .iter()
+        .filter(|(id, cfg)| fanout_ids.contains(id) && *cfg && probe_enabled(id, only, skip, no_dos, verbose))
+        .count();
+    let fair_share: Option<usize> = match max_requests {
+        Some(m) if m > 0 && fanout_enabled > 1 => Some(m.div_ceil(fanout_enabled).max(1)),
+        _ => None,
     };
 
     if auto_capped {
@@ -254,6 +316,12 @@ pub async fn run_audit(
         if m > 0 {
             warnings.push(format!("Global request budget: {} request(s) (--max-requests).", m));
         }
+    }
+
+    if !config.audit.test_injection {
+        warnings.push(
+            "Injection probes (sql-injection, os-command-injection, ssrf, xss) are DISABLED — enable with --injection (or `audit.test_injection = true` in config).".to_string(),
+        );
     }
 
     if batch_probes {
@@ -277,7 +345,7 @@ pub async fn run_audit(
         None
     };
 
-    if probe_enabled("typename", only, skip, no_dos) {
+    if probe_enabled("typename", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_typename(
@@ -292,35 +360,15 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
-    // Engine Fingerprinting
-    if probe_enabled("fingerprint", only, skip, no_dos) {
-        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
-        let start = std::time::Instant::now();
-        if let Err(e) = probe_engine_fingerprint(
-            schema,
-            url,
-            &client,
-            extra_headers,
-            current_delay,
-            evasion,
-            transport,
-            &mut confirmed,
-            &mut unconfirmed,
-        )
-        .await
-        {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
-        }
-        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
-    }
 
     // CSRF & Method Auditing
-    if probe_enabled("csrf", only, skip, no_dos) {
+    if probe_enabled("csrf", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_csrf_methods(
@@ -335,13 +383,14 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
     // Introspection method matrix (schema-disclosure surface at each auth level)
-    if probe_enabled("introspection-matrix", only, skip, no_dos) {
+    if probe_enabled("introspection-matrix", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_introspection_matrix(
@@ -356,13 +405,14 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
     // CORS / cross-origin policy
-    if probe_enabled("cors", only, skip, no_dos) {
+    if probe_enabled("cors", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_cors(
@@ -370,23 +420,25 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
     // Automatic Persisted Queries (APQ) support
-    if probe_enabled("apq", only, skip, no_dos) {
+    if probe_enabled("apq", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_apq(url, &client, extra_headers, current_delay, &mut confirmed, &mut unconfirmed).await {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
     // Per-field alias cap (anti-amplification control characterisation)
-    if probe_enabled("alias-cap", only, skip, no_dos) {
+    if probe_enabled("alias-cap", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_alias_cap(
@@ -394,12 +446,28 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
-    if probe_enabled("error-disclosure", only, skip, no_dos) {
+    if probe_enabled("node-idor", only, skip, no_dos, verbose) {
+        let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
+        let start = std::time::Instant::now();
+        if let Err(e) = probe_node_idor(
+            schema, url, &client, extra_headers, &config.audit.seeds, current_delay, evasion, transport,
+            &mut confirmed, &mut unconfirmed,
+        )
+        .await
+        {
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
+        }
+        if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
+    }
+
+    if probe_enabled("error-disclosure", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_verbose_error_disclosure(
@@ -417,12 +485,14 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
-    if config.audit.test_unauth && probe_enabled("unauth", only, skip, no_dos) {
+    if config.audit.test_unauth && probe_enabled("unauth", only, skip, no_dos, verbose) {
+        budget.start_probe(fair_share);
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_unauth_access(
@@ -442,13 +512,14 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
     if config.audit.test_idor {
-        if probe_enabled("idor", only, skip, no_dos) {
+        if probe_enabled("idor", only, skip, no_dos, verbose) {
             let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
             let start = std::time::Instant::now();
             if let Err(e) = probe_idor(
@@ -458,7 +529,7 @@ pub async fn run_audit(
                 extra_headers,
                 current_delay,
                 evasion,
-                config,
+                &config,
                 passive_findings,
                 transport,
                 &mut confirmed,
@@ -467,13 +538,15 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
         }
 
         // Mutation PrivEsc Probe
-        if probe_enabled("mutation-privesc", only, skip, no_dos) {
+        if probe_enabled("mutation-privesc", only, skip, no_dos, verbose) {
+            budget.start_probe(fair_share);
             let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
             let start = std::time::Instant::now();
             if let Err(e) = probe_mutation_privesc(
@@ -483,7 +556,7 @@ pub async fn run_audit(
                 extra_headers,
                 current_delay,
                 evasion,
-                config,
+                &config,
                 transport,
                 &scope_ctx,
                 &mut confirmed,
@@ -491,14 +564,15 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
         }
     }
 
     if config.audit.test_injection {
-        if probe_enabled("ssrf", only, skip, no_dos) {
+        if probe_enabled("ssrf", only, skip, no_dos, verbose) {
             warnings.push(
                 "SSRF probe safety warning: only run with explicit authorization from the target program."
                     .to_string(),
@@ -513,7 +587,7 @@ pub async fn run_audit(
                 extra_headers,
                 current_delay,
                 evasion,
-                config,
+                &config,
                 passive_findings,
                 transport,
                 &mut confirmed,
@@ -521,13 +595,15 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
         }
 
         // SQLi Probe
-        if probe_enabled("sql-injection", only, skip, no_dos) {
+        if probe_enabled("sql-injection", only, skip, no_dos, verbose) {
+            budget.start_probe(fair_share);
             let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
             let start = std::time::Instant::now();
             if let Err(e) = probe_sqli(
@@ -537,7 +613,7 @@ pub async fn run_audit(
                 extra_headers,
                 current_delay,
                 evasion,
-                config,
+                &config,
                 transport,
                 &scope_ctx,
                 &mut confirmed,
@@ -545,13 +621,69 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
+        }
+
+        // Auto-chain: on a confirmed SQLi, extract credentials and feed them into the seed map so
+        // the following probes (e.g. command injection on an admin-gated sink) can authenticate.
+        if chain
+            && (confirmed.iter().any(|f| f.id == "sql-injection" || f.id == "sql-injection-inline"))
+        {
+            eprintln!(
+                "  {} auto-chain: extracting credentials via the confirmed SQL injection...",
+                "→".cyan()
+            );
+            let creds = chain::harvest_credentials(
+                schema, url, &client, extra_headers, rate_limit_ms, evasion, transport, &config, &confirmed,
+            )
+            .await;
+            if let Some((user, pass)) = creds.first().cloned() {
+                // Feed the first recovered pair into the seed map by common arg names, without
+                // overwriting anything the operator already supplied.
+                for k in ["username", "user", "login", "email", "name"] {
+                    config.audit.seeds.entry(k.to_string()).or_insert_with(|| user.clone());
+                }
+                for k in ["password", "passwd", "pass", "pwd"] {
+                    config.audit.seeds.entry(k.to_string()).or_insert_with(|| pass.clone());
+                }
+                let listed = creds
+                    .iter()
+                    .take(10)
+                    .map(|(u, p)| format!("{}:{}", u, chain::mask_secret(p)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                confirmed.push(Finding {
+                    id: "credential-exposure",
+                    severity: Severity::Critical,
+                    title: "Credentials Extracted via SQL Injection (auto-chain)",
+                    description: format!(
+                        "### Analysis\nThe confirmed SQL injection was used to UNION-dump a credentials table. {} account(s) were recovered; the first pair was fed into the audit's seeds so subsequent probes can authenticate to reach protected functionality.\n\n### Evidence\n- Recovered (passwords masked): {}",
+                        creds.len(), listed
+                    ),
+                    affected: vec![AffectedLocation::Type("Credentials Store".into())],
+                    remediation: "Fix the SQL injection (parameterised queries / an ORM), store passwords only as salted hashes, and enforce least-privilege database access so a single injection cannot read the credentials table.",
+                    first_step: Some("Re-run the UNION payload from the SQLi finding against the users table and confirm the returned username/password rows.".into()),
+                    references: vec!["OWASP API8: Injection", "CWE-89: SQL Injection", "CWE-522: Insufficiently Protected Credentials"],
+                    status: FindingStatus::Confirmed,
+                    confidence: Confidence::Confirmed,
+                    evidence_level: EvidenceLevel::Executed,
+                    poc: None,
+                });
+                reported = report_new_confirmed(&confirmed, reported, verbose);
+            } else {
+                eprintln!(
+                    "  {} auto-chain: no credentials recovered (unrecognised DB/table layout).",
+                    "→".blue()
+                );
+            }
         }
 
         // Command Injection Probe
-        if probe_enabled("os-command-injection", only, skip, no_dos) {
+        if probe_enabled("os-command-injection", only, skip, no_dos, verbose) {
+            budget.start_probe(fair_share);
             let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
             let start = std::time::Instant::now();
             if let Err(e) = probe_command_injection(
@@ -561,7 +693,7 @@ pub async fn run_audit(
                 extra_headers,
                 current_delay,
                 evasion,
-                config,
+                &config,
                 transport,
                 &scope_ctx,
                 &mut confirmed,
@@ -569,13 +701,15 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
         }
 
         // XSS Probe
-        if probe_enabled("xss", only, skip, no_dos) {
+        if probe_enabled("xss", only, skip, no_dos, verbose) {
+            budget.start_probe(fair_share);
             let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
             let start = std::time::Instant::now();
             if let Err(e) = probe_xss(
@@ -585,7 +719,7 @@ pub async fn run_audit(
                 extra_headers,
                 current_delay,
                 evasion,
-                config,
+                &config,
                 transport,
                 &scope_ctx,
                 &mut confirmed,
@@ -593,14 +727,15 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
         }
     }
 
     if config.audit.test_complexity {
-        if probe_enabled("complexity", only, skip, no_dos) {
+        if probe_enabled("complexity", only, skip, no_dos, verbose) {
             let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
             let start = std::time::Instant::now();
             if let Err(e) = probe_complexity(
@@ -616,13 +751,14 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
         }
 
         // Expanded DoS Probes
-        if probe_enabled("dos-expansion", only, skip, no_dos) {
+        if probe_enabled("dos-expansion", only, skip, no_dos, verbose) {
             let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
             let start = std::time::Instant::now();
             if let Err(e) = probe_dos_expansion(
@@ -639,13 +775,14 @@ pub async fn run_audit(
             )
             .await
             {
-                eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+                if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
             }
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+            reported = report_new_confirmed(&confirmed, reported, verbose);
         }
     }
 
-    if config.audit.test_batching && probe_enabled("batching", only, skip, no_dos) {
+    if config.audit.test_batching && probe_enabled("batching", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_batching(
@@ -660,12 +797,13 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
 
-    if config.audit.test_alias_dos && probe_enabled("alias-dos", only, skip, no_dos) {
+    if config.audit.test_alias_dos && probe_enabled("alias-dos", only, skip, no_dos, verbose) {
         let current_delay = throttler.map(|t| t.delay_ms).unwrap_or(rate_limit_ms);
         let start = std::time::Instant::now();
         if let Err(e) = probe_alias_dos(
@@ -682,10 +820,15 @@ pub async fn run_audit(
         )
         .await
         {
-            eprintln!("  {} probe error: {}", "!".yellow().bold(), e);
+            if verbose { eprintln!("  {} probe error: {}", "!".yellow().bold(), e); }
         }
         if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
+        reported = report_new_confirmed(&confirmed, reported, verbose);
     }
+
+    // Erase any lingering transient probe-status line before reports print.
+    let _ = reported; // last probe's update is intentionally not read further
+    crate::progress::clear();
 
     if budget.was_hit() {
         warnings.push(format!(
@@ -700,6 +843,7 @@ pub async fn run_audit(
         confirmed: consolidate_findings(confirmed),
         unconfirmed: consolidate_findings(unconfirmed),
         warnings,
+        server_fingerprint: None,
     })
 }
 
@@ -731,6 +875,9 @@ pub fn print_audit_text_report(report: &AuditReport, max_affected: usize, verbos
         "Target:".bright_black(),
         report.source.bright_white()
     );
+    if let Some(fp) = &report.server_fingerprint {
+        println!("  {} {}", "Server:".bright_black(), fp.label().bright_white());
+    }
     println!(
         "  {} {}",
         "Passive findings:".bright_black(),
@@ -767,6 +914,14 @@ pub fn print_audit_text_report(report: &AuditReport, max_affected: usize, verbos
                     }
                 }
             }
+            // sqlmap exploitation hand-off for confirmed injections — always shown
+            // (it's the key actionable next step), line-by-line so it stays copy-pasteable.
+            if let Some(guide) = crate::audit::poc::sqlmap_guide(f, &report.source) {
+                println!("      {}", "Exploit (sqlmap):".bright_black());
+                for line in guide.lines() {
+                    println!("        {}", line.green());
+                }
+            }
             println!();
         }
     }
@@ -790,14 +945,25 @@ pub fn print_audit_text_report(report: &AuditReport, max_affected: usize, verbos
 }
 
 pub fn print_audit_json_report(report: &AuditReport) {
+    // Serialize each finding and attach the sqlmap exploitation guide (injections only).
+    let enrich = |f: &Finding| {
+        let mut v = serde_json::to_value(f).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(g) = crate::audit::poc::sqlmap_guide(f, &report.source) {
+            v["exploit_guide"] = serde_json::json!(g);
+        }
+        v
+    };
+    let confirmed: Vec<_> = report.confirmed.iter().map(enrich).collect();
+    let unconfirmed: Vec<_> = report.unconfirmed.iter().map(enrich).collect();
     let output = serde_json::json!({
         "source": report.source,
+        "server_fingerprint": report.server_fingerprint,
         "passive_total_findings": report.passive_total_findings,
         "confirmed_total": report.confirmed.len(),
         "unconfirmed_total": report.unconfirmed.len(),
         "warnings": report.warnings,
-        "confirmed": report.confirmed,
-        "unconfirmed": report.unconfirmed,
+        "confirmed": confirmed,
+        "unconfirmed": unconfirmed,
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }
@@ -805,6 +971,9 @@ pub fn print_audit_json_report(report: &AuditReport) {
 pub fn print_audit_markdown_report(report: &AuditReport, max_affected: usize) {
     println!("# GraphQL Active Audit Report\n");
     println!("- Source: {}", report.source);
+    if let Some(fp) = &report.server_fingerprint {
+        println!("- Server framework: {}", fp.label());
+    }
     println!(
         "- Passive possibility findings: {}",
         report.passive_total_findings
@@ -840,6 +1009,10 @@ pub fn print_audit_markdown_report(report: &AuditReport, max_affected: usize) {
             if let Some(poc) = &f.poc {
                 println!("#### PoC\n");
                 println!("```graphql\n{}\n```\n", poc);
+            }
+            if let Some(guide) = crate::audit::poc::sqlmap_guide(f, &report.source) {
+                println!("#### Exploit with sqlmap\n");
+                println!("```bash\n{}\n```\n", guide);
             }
             println!("#### Remediation\n");
             println!("{}\n", f.remediation);

@@ -42,12 +42,16 @@ pub async fn probe_xss(
         }
     }
 
-    // Focus / rank by passive severity / cap to --max-targets before probing.
-    let targets = crate::audit::targets::scope_targets(
+    // Focus / rank (XSS-reflection name affinity first, then passive severity) / cap.
+    let targets = crate::audit::targets::scope_targets_prioritized(
         targets,
         ctx.sev_index,
         ctx.scope,
         |t| (t.1.to_string(), t.2.name.clone()),
+        |t| crate::audit::targets::name_affinity(
+            &format!("{} {}", t.2.name, t.3.name),
+            crate::audit::targets::XSS_KEYWORDS,
+        ),
     );
 
     let headers = effective_headers(extra_headers, None, false);

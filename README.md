@@ -1,8 +1,8 @@
 # Introspectre
 
-Introspectre is a GraphQL **offensive security engine** built in Rust. It combines static schema analysis with active probing to surface logical flaws, implementation errors, and protocol-level risks in GraphQL APIs.
+Introspectre is a GraphQL **offensive security tool** built in Rust. It combines static schema analysis with active probing to surface logical flaws, implementation errors, and protocol-level risks in GraphQL APIs.
 
-_Current version: **1.6.0** — see the [Changelog](./CHANGELOG.md)._
+_Current version: **1.8.0** — see the [Changelog](./CHANGELOG.md)._
 
 > [!TIP]
 > **Documentation**
@@ -35,6 +35,7 @@ Designed for security researchers and penetration testers, Introspectre emphasiz
 * **Live introspection**: fetches the schema via fragmented introspection queries (for compatibility with length-limiting WAFs), or analyzes a local `schema.json` file.
 * **Clairvoyance engine**: when introspection is disabled, reconstructs the schema by brute-forcing field names from a wordlist and exploiting GraphQL "Did you mean?" suggestions.
 * **Auth guard mapping**: identifies which root fields respond as public versus protected, based on unauthenticated probes.
+* **Server-framework fingerprinting**: identifies the GraphQL server implementation (graphw00f-style — Apollo, graphql-ruby, Hasura, Graphene, Hot Chocolate, graphql-java/Spring, gqlgen, Absinthe, and more) from schema shape, headers, and error signatures; reported during the run and in every report. `--no-fingerprint` to skip.
 * **Backend fingerprinting**: flags likely backend technology (e.g., Prisma, Hasura, PyMySQL) from error signatures.
 
 ### Passive Schema Analysis
@@ -61,10 +62,10 @@ Active probes attempt to *confirm* — not guarantee — the presence of a vulne
 * **Persistence**: learned values are cached locally (SQLite) so probes stay high-fidelity across sessions.
 
 ### Reporting
-* **Self-contained HTML report**: the interactive visual report bundles its own WebGL graph engine (Sigma.js and graphology) — it renders fully offline with no external CDN dependency.
-* **Field-centric graph**: fields are the primary nodes, edges represent traversals, weights represent estimated cost.
-* **Isolate mode & pathfinding**: isolate a single data path, or auto-generate the optimal query path to any field.
-* **Embedded proofs**: findings in the visual report include ready-to-reproduce queries with the triggering payload inlined.
+* **Interactive visualizer**: `--visualize` starts a local web app (bound to `127.0.0.1`, opens your browser, stops on Ctrl+C) that renders the attack surface on WebGL (Sigma.js and graphology). All assets are embedded in the binary, so it runs fully offline with no external CDN dependency.
+* **Type-centric graph**: types are the nodes, edges are labeled with the field that connects them, and node color encodes finding risk.
+* **Isolate & trace**: focus a single node's neighborhood, or right-click to trace the path from a root operation down to a selected type.
+* **Embedded proofs**: selecting a finding surfaces ready-to-reproduce queries with the triggering payload inlined, plus the exploitation guide.
 * **Structured findings**: text, JSON, and Markdown output, each finding broken into analysis, evidence, and remediation.
 
 ---
@@ -125,12 +126,12 @@ For the latest unreleased changes, or to hack on Introspectre, build from the re
 ### Passive scan (default)
 `scan` defaults to `--static-only true` — it only performs live introspection and passive schema analysis. No offensive payloads are sent unless you explicitly opt in (`--static-only false`) or run `audit`.
 ```bash
-introspectre scan https://api.target.com/graphql --visualize report.html
+introspectre scan https://api.target.com/graphql --visualize
 ```
 
 ### Active audit
 ```bash
-introspectre audit https://api.target.com/graphql --visualize audit.html
+introspectre audit https://api.target.com/graphql --visualize
 ```
 
 ### Traffic-informed scan
@@ -150,6 +151,7 @@ See [USAGE.md](./USAGE.md) for a full case-by-case walkthrough, including blind 
 | `audit <url>` | Active behavioral probing: attempts to confirm vulnerabilities against a live endpoint using schema-derived and seeded data. |
 | `brute <url>` | Blind schema reconstruction when introspection is disabled — probes field names (optional `-w` wordlist) and harvests "Did you mean?" suggestions, then analyzes the result. |
 | `file <path>` | Analyzes a previously saved introspection JSON file (no network requests). |
+| `config <get\|set\|show\|path>` | View or edit settings in `config.toml`, e.g. `config set audit.max_type_walk_types 5000`. |
 
 > [!NOTE]
 > `scan` is **passive by default** — `--static-only` defaults to `true`. To include active probes in a `scan` run, pass `--static-only false`, or use `audit` directly for a dedicated active-probing pass.
@@ -168,7 +170,8 @@ Available on every subcommand (see [USAGE.md](./USAGE.md) for the full per-comma
 | `--user-agent <UA>` | Custom User-Agent string. |
 | `--stealth` | Use a common browser User-Agent. |
 | `--use-schema <FILE>` | Use a local schema JSON file instead of live introspection. |
-| `--visualize [PATH]` | Generate the interactive HTML report (defaults to `introspectre-visual.html`). |
+| `--visualize` | Serve the interactive attack-surface graph on a local web server (`127.0.0.1`, opens your browser, Ctrl+C to stop). |
+| `--port <PORT>` | Preferred port for `--visualize` (default `7878`; falls back to a free port if busy). |
 | `--seed-traffic <FILE>` | Learn variable values from a HAR or Burp XML file. |
 | `--seeds <FILE>` | Provide known-good values via JSON. |
 | `--verbose` | Include extra detail (e.g., PoC blocks) in text output. |
@@ -229,6 +232,7 @@ cargo install --git https://github.com/m3m0rydmp/Introspectre
 ```
 
 ---
+
 ## Legal & Ethical Use
 
 Introspectre is intended for **authorized security research, penetration testing, and defensive assessment only**.

@@ -42,12 +42,16 @@ pub async fn probe_sqli(
         }
     }
 
-    // Focus / rank by passive severity / cap to --max-targets before probing.
-    let targets = crate::audit::targets::scope_targets(
+    // Focus / rank (SQL name affinity first, then passive severity) / cap before probing.
+    let targets = crate::audit::targets::scope_targets_prioritized(
         targets,
         ctx.sev_index,
         ctx.scope,
         |t| (t.1.to_string(), t.2.name.clone()),
+        |t| crate::audit::targets::name_affinity(
+            &format!("{} {} {}", t.2.name, t.3.name, t.4),
+            crate::audit::targets::SQLI_KEYWORDS,
+        ),
     );
 
     let headers = effective_headers(extra_headers, None, false);
@@ -90,7 +94,9 @@ pub async fn probe_sqli(
 
     'targets: for (op, root, field, arg, path) in targets {
         let is_mutation = op == "mutation";
-        eprintln!("  {} Testing SQLi/NoSQLi/SSTI Injection on {}.{}({})...", "→".cyan(), root, field.name, path);
+        // Transient (in-place, TTY-only) so per-target progress doesn't scroll-spam
+        // and stays clean when piped / in --format json.
+        crate::progress::transient(&format!("  {} Testing injection on {}.{}({})...", "→".cyan(), root, field.name, path));
 
         // Baseline: Send a dummy value first
         if !ctx.budget.try_consume() { break 'targets; }

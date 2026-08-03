@@ -170,6 +170,15 @@ pub struct AuditConfig {
     /// unlimited.
     #[serde(default)]
     pub max_total_requests: Option<usize>,
+    /// Safety cap on how many types the `__type`-walk fallback will reconstruct
+    /// when `__schema` is disabled. Raise it (or set to 0 for unlimited) if a
+    /// large schema is being truncated. Default 1000.
+    #[serde(default = "default_max_type_walk")]
+    pub max_type_walk_types: usize,
+}
+
+fn default_max_type_walk() -> usize {
+    1000
 }
 
 impl Default for AuditConfig {
@@ -185,6 +194,7 @@ impl Default for AuditConfig {
             custom_payloads: Vec::new(),
             max_targets_per_probe: None,
             max_total_requests: None,
+            max_type_walk_types: default_max_type_walk(),
         }
     }
 }

@@ -2,6 +2,309 @@
 
 All notable changes to Introspectre are summarized here at a high level. For the full command/flag surface, see [USAGE.md](./USAGE.md).
 
+## [1.13.4] - 2026-08-03
+
+### Visualizer performance: level-of-detail + chunked expand-all
+* **Level-of-detail labels.** The WebGL graph now drops label rendering entirely when the camera is
+  zoomed out past a ratio cutoff (a cluster overview where per-node labels are unreadable anyway),
+  and restores them on zoom-in — a large frame-time saving on big schemas. The toggle only fires when
+  the state actually flips.
+* **Chunked "Expand all children".** Expanding a high-degree node used to insert every reachable node
+  and run the full forceAtlas2 relayout in one synchronous pass, freezing the tab. Above ~600 nodes
+  the expansion now adds nodes and edges in `requestAnimationFrame`-batched chunks (400/frame) with
+  new nodes pre-seeded near the anchor, followed by a single **light** layout pass — the graph visibly
+  grows instead of hanging. (Sigma/graphology run on the main thread, so rAF chunking is the practical
+  substitute for a worker.)
+
+## [1.13.3] - 2026-08-03
+
+### CLI/UX polish: `--exit-zero` and clearer reconstruction failures
+* **`--exit-zero`** (global). Introspectre normally exits non-zero when High/Medium findings are
+  present (a CI "findings gate"). `--exit-zero` suppresses that so interactive or chained runs aren't
+  treated as failed commands; the report is unchanged.
+* **Clearer reconstruction failures.** When every introspection vector *and* the `__type`-walk fallback
+  fail, the error now surfaces the **real last `__schema` server error** (e.g. a depth/complexity
+  rejection) plus the `__type`-walk failure reason, and adds a targeted hint when the server enforces an
+  introspection depth/complexity limit — instead of a generic "failed to parse response".
+
+## [1.13.2] - 2026-08-03
+
+### Streaming traffic parse
+* `--seed-traffic` / session extraction now parse HAR and Burp exports through a **buffered reader**
+  (`serde_json::from_reader` / `quick_xml::de::from_reader`) instead of reading the whole file into a
+  `String` first, cutting peak memory on large captures. Both formats share one loader and the same
+  seed output. *(The parsed structure is still materialised; a full zero-DOM event stream remains a
+  possible further step.)*
+
+## [1.13.1] - 2026-08-03
+
+### ID-scheme breadth
+* The global-ID classifier now distinguishes **time-based UUIDv1** (flagged as *potentially
+  predictable — manual review*, distinct from random v4) and recognises **bare hex hashes**
+  (MD5/SHA-1/SHA-256 → 128/160/256-bit) as opaque identifiers requiring manual review, rather than
+  collapsing everything into "random UUID" or "opaque". Enumerability verdicts are unchanged (only the
+  numeric schemes remain enumerable); the new variants are reported as leads, not synthetic guesses.
+
+## [1.13.0] - 2026-08-02
+
+### Auto-chain: SQLi → credential theft → authenticated probing
+* New **`--chain`** flag (audit). On a **confirmed SQL injection**, the audit makes a bounded,
+  best-effort attempt to **extract credentials** — it discovers the UNION column count, maps a
+  readable string column, and brute-forces a short list of common `(table, user_col, pass_col)`
+  combinations to dump `username`/`password` rows — then **feeds a recovered pair into the seed map**
+  (by argument name) so **later probes can authenticate** and reach otherwise auth-gated sinks. It
+  emits a `credential-exposure` finding (passwords masked in the report). Heuristic (targets lax DBs
+  like SQLite/MySQL/Postgres with conventional table/column names), bounded (~40 requests), and
+  opt-in (`--chain` implies `--injection`). *(DVGA, no `--seeds`: confirms SQLi → recovers
+  `admin:changeme` → confirms the admin-gated `systemDiagnostics(cmd)` RCE — the full chain,
+  automated.)*
+
+## [1.12.4] - 2026-08-02
+
+### Fair request budget across probes
+* The global `--max-requests` budget is now **fair-shared** across the enabled fan-out probes
+  (`unauth`, `mutation-privesc`, `sql-injection`, `os-command-injection`, `xss`): each gets an equal
+  slice via a per-probe cap, so an early probe can no longer drain the whole budget before later ones
+  run. Previously, under a tight `--max-requests`, `sql-injection` could consume everything and
+  `os-command-injection` never got a turn. *(DVGA: `--only sql-injection,os-command-injection
+  --max-requests 44` now confirms both, where before the command-injection sink was starved.)*
+
+## [1.12.3] - 2026-08-02
+
+### Detect exposed GraphQL IDEs
+* The audit now flags an exposed in-browser **GraphQL IDE** (GraphiQL, GraphQL Playground, Altair,
+  Voyager) as its own finding. It GETs the endpoint and common sibling paths (`/graphiql`,
+  `/playground`, `/altair`, `/voyager`, `/console`) with `Accept: text/html` and matches IDE markers in
+  the returned HTML (any `--cookie`/headers you pass are forwarded, so a cookie-gated IDE is still
+  detectable). *(DVGA: confirms GraphiQL served at `/graphiql`.)*
+
+## [1.12.2] - 2026-08-02
+
+### IDOR probe works without session config (safe unauthenticated check)
+* When no `session.auth_header`/`session.owned_ids` is configured, the `idor` probe no longer just
+  reports "skipped". It now runs a **safe, read-only unauthenticated** check on the ID-taking **query**
+  fields flagged passively: if a field returns **distinct objects for different IDs with no auth**, it
+  reports *Unauthenticated Enumerable Object Access* (a BOLA/IDOR lead) with a PoC. It never touches
+  mutations and **skips destructive-named query fields** (e.g. DVGA's `readAndBurn`) so it can't change
+  server state. The authenticated cross-tenant test (with session config) is unchanged. *(DVGA: now
+  flags `Query.users(id)` — reading arbitrary users by id unauthenticated — instead of skipping.)*
+
+## [1.12.1] - 2026-08-02
+
+### Output polish
+* `brute` runs are now labelled **"Blind reconstruction (brute)"** in the report header instead of the
+  misleading "Live scan (active probes enabled)".
+* The audit's per-probe transient request errors (`! probe error: …`) are now only shown under
+  `--verbose` — a single dropped request (common on a single-threaded dev server, already retried once)
+  no longer looks like a defect in the default output.
+
+## [1.12.0] - 2026-08-02
+
+### Seed audit arguments by name (supply known credentials / tokens / ids)
+* Audit seeds (`--seeds <FILE>` / `[audit.seeds]`) now match **by argument or input-field name** in
+  addition to type name, with the **name match winning**. This lets you give distinct known values to
+  sibling arguments of the same scalar type — e.g. `{"username":"admin","password":"changeme"}` — so an
+  **auth-gated sink can be reached**. Previously seeds keyed only by type, so `username` and `password`
+  (both `String`) were indistinguishable. Injection payloads still take precedence over any seed.
+  *(DVGA: with the SQLi-recoverable admin creds seeded, `audit --injection` now also confirms the
+  auth-gated `systemDiagnostics(cmd)` RCE — not just the unauthenticated `systemDebug(arg)`. Without the
+  creds it correctly stays gated.)*
+
+## [1.11.7] - 2026-08-02
+
+### Audit prioritizes likely injection sinks
+* Injection probes now rank their targets by **name affinity first**, then passive-finding severity —
+  so a field/argument whose name suggests the relevant sink (e.g. `cmd`/`exec`/`debug`/`host` for
+  command injection; `filter`/`search`/`id` for SQLi) is probed **before** passively-flagged but
+  non-vulnerable fields. Previously, ranking was severity-only, so an obvious sink that no passive
+  finding touched (e.g. DVGA's `systemDebug(arg)`) sorted last and could be **starved by the
+  `--max-requests` budget** or the large-schema auto-cap. Applies to `sql-injection`,
+  `os-command-injection`, and `xss` (SSRF is already driven by its passive finding). *(DVGA: a tight
+  `--max-requests 30` now confirms the `systemDebug(arg)` RCE that a capped run previously missed.)*
+
+## [1.11.6] - 2026-08-02
+
+### `brute` now shows what it found
+* A default `brute` run previously printed almost nothing (the reconstruction summary was
+  `--verbose`-only, and the passive report was never rendered for `brute`), so it looked like it did
+  nothing. Now it **always** prints a completion summary with the **list of discovered fields**, and
+  it renders the full schema report (overview + findings) on the reconstructed schema, exactly like
+  `scan`/`file`. *(Against DVGA it now reports the 9 recovered roots — `pastes`, `search`, `me`,
+  `systemUpdate`, `systemDebug`, `systemHealth`, ….)*
+
+## [1.11.5] - 2026-08-02
+
+### `__type`-walk works against depth/complexity-limited servers
+* Blind `__type`-walk reconstruction now succeeds on servers that reject deep introspection queries
+  (query depth/complexity guards). `fetch_type` progressively falls back — full selection at depth 4,
+  then depth 2, then a **stripped minimal query** (a shallow `ofType` chain, no args/enums/interfaces/
+  possibleTypes) — and now retries on **transport errors** (some dev servers reset the connection on an
+  over-deep query) instead of giving up, only concluding a type is absent on the final, simplest attempt.
+  *(Against DVGA "Expert" mode — which has an aggressive depth guard — reconstruction went from a total
+  failure with a misleading "Failed to parse JSON" message to recovering 8 types / 33 fields / 12
+  queries.)*
+
+## [1.11.4] - 2026-08-02
+
+### Audit no longer gives up when introspection is blocked
+* Previously, if a target had introspection disabled (and the `__type`-walk fallback failed), `audit`
+  aborted and ran **no** probes at all. Now it continues with an empty schema and still runs the
+  **schema-independent** probes (CSRF, introspection method matrix, `__typename`, CORS, APQ), printing a
+  note that the schema is unavailable and pointing to `brute` / `--use-schema` for full coverage. The
+  schema-dependent fan-out probes simply have no targets. (A hard bot-wall block is still fatal.)
+  *(Surfaced by DVGA "Expert" mode — audit went from zero findings to confirming the introspection
+  matrix and GraphQL behavior.)*
+
+## [1.11.3] - 2026-08-02
+
+### Audit: injection probes are now discoverable
+* The injection-class probes (`sql-injection`, `os-command-injection`, `ssrf`, `xss`) are off by
+  default (they send exploit-style payloads), which previously meant a plain `audit` silently skipped
+  them. Now: a default `audit` prints a **notice** that they're disabled and how to enable them; the
+  `--dry-run` preview **lists** the config-disabled probes instead of omitting them; and a new
+  **`--injection`** flag enables them for the run. Naming any injection probe in `--only` (e.g.
+  `--only sql-injection`) also enables it automatically. *(Surfaced by DVGA testing — a default audit
+  was missing the target's SQLi.)*
+
+## [1.11.2] - 2026-08-02
+
+### Whole-database cache purge
+* New global **`--purge-db`** flag wipes the **entire** cache database — every target's cached scan,
+  learned seeds, and project records — in one go (the per-target `--purge-cache` only clears one). It
+  runs **without a subcommand** and behind a **prominent confirmation**: it prints exactly what will be
+  deleted (target/scan/seed counts) and requires you to type `yes`. Non-interactive/piped input that
+  isn't `yes` aborts safely, so it can't fire unattended. Running with no subcommand and no `--purge-db`
+  now prints a short usage hint.
+
+## [1.11.1] - 2026-08-02
+
+### Fixes
+* **Guide overlay scrolls smoothly.** The Guide overlay used a full-screen `backdrop-filter` blur over
+  the live WebGL canvas, so scrolling re-composited the blurred backdrop every frame and felt laggy.
+  Replaced it with an opaque scrim (and isolated the content's scroll repaint); no visual change beyond
+  a slightly darker dim.
+
+## [1.11.0] - 2026-08-02
+
+### In-app GraphQL security guide
+* The visualizer gains a **Guide** button (top bar) that opens a self-contained, offline reference:
+  what GraphQL is, the query language, the server ecosystem, and the attack vectors — introspection
+  exposure, broken authorization / BOLA / IDOR (incl. Relay global-id enumeration), injection→sqlmap,
+  DoS (depth/complexity/aliasing/batching), CSRF, and schema hygiene — each mapped to what
+  Introspectre detects, plus a working-the-graph walkthrough. **Framework-aware:** when the target's
+  server framework is fingerprinted, its section is surfaced first with a tailored note.
+
+## [1.10.0] - 2026-08-02
+
+### Target switcher
+* The visualizer can now **switch between targets already cached** in `introspectre.db` from a top-bar
+  dropdown — no re-scan and no network. The server lists cached projects (`GET /api/targets`) and
+  reconstructs any target's full payload on demand (`GET /api/targets/:id/schema`) by re-running the
+  passive analysis over its stored schema (on a blocking thread), replaying the cached fingerprint and
+  learned seeds. Switching reloads the graph and panels in place.
+
+## [1.9.2] - 2026-08-02
+
+### Sample-query paths prefer satisfiable arguments
+* The per-node **Sample Query** path search is now argument-aware. It became a weighted shortest-path
+  (multi-source Dijkstra) that prefers the cheapest reachable entry point — an arg-free or simple-`id`
+  field beats one requiring a complex input object, even at equal depth (e.g. `userById(id:)` over
+  `search(input: SearchInput!)`). Generated queries also render **only required arguments**, keeping
+  them minimal and runnable.
+
+## [1.9.1] - 2026-08-02
+
+### Visualizer fixes
+* **Node dragging tracks the cursor.** Dragging previously over-moved and could fling a node
+  out of view; it now uses a grab-offset (and suppresses camera panning during the drag) so the
+  grab point stays exactly under the pointer at any zoom. Wheel / double-click zoom unchanged.
+* **Per-node Sample Query is now a complete, runnable operation.** Instead of a bare selection
+  stub, clicking a node shows the full `query { … }` that reaches it via the **shortest path from
+  a root operation** — objects get a nested selection, scalars and enums get the leaf field path,
+  and arguments along the way are filled from learned seeds or synthesized samples. (Computed with
+  a single multi-source BFS over the type graph.) Types unreachable from any root fall back to a
+  labeled selection fragment.
+* **Copy omits comments.** Copying a query template now yields just the runnable query — the `#`
+  hint/annotation lines are stripped from the clipboard while remaining visible on screen. (PoC,
+  exploitation-guide, and sqlmap blocks are copied verbatim.)
+
+## [1.9.0] - 2026-08-01
+
+### Interactive visualizer is now a local web app
+* `--visualize` no longer writes a static HTML file. It now starts a small local
+  **web server** (bound strictly to `127.0.0.1`) that serves an interactive
+  attack-surface workspace and exposes the analysis result as JSON at
+  `GET /api/schema`; the frontend fetches that on load. The server runs in the
+  foreground and stays alive until you press **Ctrl+C**.
+* The flag is now a bare switch (`--visualize`, no path argument). Add `--port`
+  to pick a port; the default is `7878` and it automatically **falls back** to a
+  free port if that one is busy, so concurrent visualizers never clash. The URL is
+  printed and your **default browser is opened** automatically (with a WSL/headless
+  fallback that just prints the URL to open manually).
+* **Rewritten frontend.** The graph is rendered on **WebGL** (Sigma.js + graphology)
+  with Sigma's native camera, so wheel-zoom, drag-pan, and node selection are
+  independent — clicking a node inspects it instead of hijacking the zoom. It keeps
+  the search, scalar toggle, isolate/focus, reset, fit, right-click expansion
+  (relations / all children / trace-to-root / hide), findings/seeds/schema panels,
+  server-framework badge, and legend, in a dark workspace theme. All assets are
+  embedded in the binary, so the server is fully self-contained and offline.
+* **Workspace polish:** nodes are now **draggable** (wheel/double-click zoom
+  unchanged); the node-detail panel shows a **Sample Query** for each node —
+  root-operation fields get a ready-to-run operation template (with seed values
+  and auth hints), other object types get a selection stub, and enums list their
+  values; the **Schema** tab regains a full collapsible **type → field tree** (with
+  enum values and click-to-focus) alongside the stat cards; and the detected
+  **GraphQL framework/ecosystem** is always surfaced (shown as *undetected* when
+  the fingerprint is inconclusive rather than silently omitted).
+
+## [1.8.0] - 2026-08-01
+
+### Result caching (default)
+* `scan` and `brute` now **reuse the last cached schema for a target by default**, so re-running (for example after forgetting `--visualize`) regenerates the report **without another round of requests**. The schema is served from the local `introspectre.db`, findings are recomputed locally, and a notice shows the cache timestamp.
+* New `--purge-cache` flag clears a target's cached scan and forces a fresh fetch.
+* Live operations always fetch fresh and bypass the cache: `scan --static-only false` and `audit`.
+
+### Blind reconstruction — graphql-ruby
+* Fixed `brute`'s field-existence detection, which previously treated any error other than Apollo's `"Cannot query field"`/`"not defined"` as *field exists* — so against graphql-ruby servers (which say `"Field 'x' doesn't exist on type 'Query'"`) it marked essentially every probed word as real. It now recognises the graphql-ruby/other phrasings as *missing*, and treats selection/argument errors as *field exists*.
+* `brute` now **captures leaked return types**: graphql-ruby answers an object field with `"field 'user' returns User but has no selections"`, so discovered fields come back **typed** (e.g. `user: User`) with stub type nodes added, instead of all-`String`.
+* Introspection failures now surface the server's real GraphQL error on a non-2xx response (e.g. graphql-ruby's HTTP 422 `Field '__schema' doesn't exist on type 'Query'`) instead of a bare "HTTP 422".
+
+### `__type`-walk
+* The partial-schema cap warning is now shown **by default** (not only under `--verbose`), and the cap is **configurable** via `audit.max_type_walk_types` in config (default 1000; `0` = unlimited). The message points at the setting so a truncated reconstruction is obvious and adjustable.
+
+### Settings
+* New `config` command to view and edit `config.toml` without hand-editing: `config set <key> <value>` (e.g. `config set audit.max_type_walk_types 5000`), `config get <key>`, `config show`, and `config path`. Edits preserve existing comments and formatting.
+
+### Node/Relay IDOR (active)
+* New active `node-idor` audit probe that operationalizes the passive `node-idor-surface` flag. It obtains a real global id — from `--seeds`/`--seed-traffic`, else by fetching one of the tester's own accessible objects — base64-decodes it to classify the id **scheme** (`gid://host/Type/<int>`, `Type:<int>` and `Type-<int>` for the graphql-relay-JS and graphql-ruby node-id formats, bare int, UUID, type-tagged UUID, or opaque/signed), and, when the scheme is sequentially enumerable, reports a High-confidence IDOR with a concrete **adjacent-id PoC** (decode → change the counter → re-encode). Opaque/signed or UUID schemes are reported as non-enumerable (no over-fire). It also runs a conservative `node(id){ …on OtherType{…} }` **type-confusion** check for cross-type field leaks. Safe: only ids the tester can already read are used — no cross-tenant access, no mutations.
+
+### Server-framework fingerprinting
+* `scan`/`brute`/`audit` now identify the target's **GraphQL server framework** (graphw00f-style) and report it **during the run** (without `--verbose`), in the terminal summary, JSON/markdown (`server_fingerprint`), and the HTML report's header. The result is stored with the cached scan, so cache-served re-runs still show it (no re-probing). Detection combines schema-shape signals (Hasura's auto-generated `_by_pk`/`timestamptz`, Strapi/Prisma naming — free, no requests), response headers (`x-graphql-engine-version`, `apollo-cache-control`, `x-amzn-*`, `Server: Cowboy`, …), and a couple of benign error-probe signatures (graphql-ruby, Apollo/graphql-js, graphql-java/Spring, Hot Chocolate, Graphene, gqlgen, Absinthe, Sangria, and more). It is honest — it reports nothing rather than guess when unsure — and skippable via `--no-fingerprint`.
+* Fixed: the `--purge-cache` / "using cached scan" notices were printed to stdout and could corrupt `--format json`/`markdown`; they now go to stderr.
+
+### Exploitation guidance & live audit output
+* Confirmed SQL/NoSQL **injection** findings now include a ready-to-run **sqlmap** command tailored to the endpoint and the injectable argument (the value marked with `*`), plus the saved-request (`-r req.txt`) method and an auth note. Shown in the terminal, JSON (`exploit_guide`), markdown, and the interactive HTML report. Introspectre confirms the flaw; sqlmap takes exploitation/extraction further.
+* `audit --verbose` now prints a live `✓ FOUND: <title> [<id>]` line the moment a probe confirms a finding, instead of only in the final summary. Progress stays on stderr, so `--format json`/`markdown` stdout is unaffected; noisy per-target "Testing…" lines are now in-place/TTY-only.
+
+### Blind discovery
+* Expanded the built-in `brute` wordlist of common GraphQL root-field names, and fixed a bug where it was never actually used: without `-w`, `brute` now probes the **union** of the curated built-in list and your config-derived terms (~240 names, deduped) instead of only the config words.
+
+## [1.7.0] - 2026-08-01
+
+### Bot-management / WAF-aware diagnostics
+* Endpoints fronted by a bot-management product (PerimeterX/HUMAN, Cloudflare, Akamai, DataDome, Imperva/Incapsula) are now recognised. When a challenge response (e.g. an HTTP 403/404 HTML "access denied"/captcha page returned *before* GraphQL is reached) is detected, `scan`/`audit` report the real cause and the vendor — instead of the misleading "introspection disabled — try `brute`" (which hits the same wall). Detection inspects the response status, headers, and body (a `px-captcha` page, a Cloudflare `__cf_bm` bot-management response, an Akamai/DataDome/Imperva signature, etc.) and is careful not to flag genuine JSON API auth errors.
+
+### Session reuse for protected endpoints
+* New global `--cookie "<raw cookie header>"` flag: pass a bot check in a real browser, then paste the resulting session cookies to reuse that session on every request.
+* `--seed-traffic` (HAR / Burp XML) now also extracts and replays the captured request's `Cookie` / `Authorization` / custom `x-*` headers for the target host — not just variable values — so a recorded browser session can be replayed by the tool.
+* This enables the legitimate authorized-testing workflow of reusing **your own** session; it does not bypass a bot wall autonomously.
+
+### Requests
+* Requests now send a realistic browser header baseline (`Accept`, `Accept-Language`). `--stealth` additionally sends Chromium client hints (`sec-ch-ua`, `sec-fetch-*`) and same-origin `Origin`/`Referer` — previously `--stealth` was a near-no-op.
+
+### Verbose progress
+* `--verbose` now shows live, per-request progress during long/looping operations (`__type`-walk reconstruction, `brute`, and each audit probe) instead of going silent. Output is two-tier: a **transient**, in-place status line (overwrites itself) for high-frequency "currently doing X" updates, and **persistent** lines for phase changes, warnings, and summaries you can read later in scrollback. All progress goes to stderr and the in-place updates are shown only on an interactive terminal, so piped output and `--format json`/`markdown` on stdout stay clean.
+
 ## [1.6.0] - 2026-07-31
 
 ### Blind schema reconstruction via `__type`-walk

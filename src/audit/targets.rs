@@ -103,6 +103,27 @@ fn rank_score(sev_index: &HashMap<String, Severity>, type_name: &str, field_name
     a.max(b)
 }
 
+/// Command/injection keyword sets used to prioritize likely sinks — see [`name_affinity`].
+/// A sink whose field/arg/path name matches these ranks ahead of passively-flagged but
+/// non-vulnerable fields, so a budget-capped run still reaches it.
+pub const CMDI_KEYWORDS: &[&str] = &[
+    "cmd", "command", "exec", "run", "shell", "ping", "host", "hostname", "debug", "diag",
+    "diagnostic", "system", "os", "proc", "process", "spawn", "subprocess", "bash", "sh",
+];
+pub const SQLI_KEYWORDS: &[&str] = &[
+    "filter", "query", "search", "where", "order", "sort", "id", "name", "email", "user", "login",
+];
+pub const XSS_KEYWORDS: &[&str] = &[
+    "html", "content", "body", "message", "comment", "title", "description", "bio", "name", "text",
+];
+
+/// Count how many `keywords` appear (as lowercase substrings) in `haystack` — a cheap
+/// name-based affinity signal for how likely a target is to be a real sink for a given probe.
+pub fn name_affinity(haystack: &str, keywords: &[&str]) -> i32 {
+    let hay = haystack.to_lowercase();
+    keywords.iter().filter(|k| hay.contains(*k)).count() as i32
+}
+
 /// Apply `--focus`, passive-severity ranking, and the per-probe `--max-targets` cap to a
 /// probe's target list. `key` extracts `(type_name, field_name)` from each target so the
 /// same routine works across the probes' differently-shaped target tuples.
@@ -111,6 +132,20 @@ pub fn scope_targets<T>(
     sev_index: &HashMap<String, Severity>,
     scope: &AuditScope,
     key: impl Fn(&T) -> (String, String),
+) -> Vec<T> {
+    scope_targets_prioritized(targets, sev_index, scope, key, |_| 0)
+}
+
+/// Like [`scope_targets`], but ranks by `(priority desc, then passive-severity desc)`. Injection
+/// probes pass a name-affinity `priority` so likely sinks are probed first even under a tight
+/// `--max-requests`/`--max-targets` budget (which otherwise starves an obvious sink that no passive
+/// finding happened to touch).
+pub fn scope_targets_prioritized<T>(
+    targets: Vec<T>,
+    sev_index: &HashMap<String, Severity>,
+    scope: &AuditScope,
+    key: impl Fn(&T) -> (String, String),
+    priority: impl Fn(&T) -> i32,
 ) -> Vec<T> {
     // 1. Focus filter.
     let mut kept: Vec<T> = targets
@@ -121,12 +156,14 @@ pub fn scope_targets<T>(
         })
         .collect();
 
-    // 2. Rank by passive severity, descending. Stable sort keeps the original schema order
-    //    among equally-ranked targets.
+    // 2. Rank by name affinity first, then passive severity, both descending. Stable sort keeps
+    //    the original schema order among equally-ranked targets.
     kept.sort_by(|a, b| {
         let (at, af) = key(a);
         let (bt, bf) = key(b);
-        rank_score(sev_index, &bt, &bf).cmp(&rank_score(sev_index, &at, &af))
+        priority(b).cmp(&priority(a)).then_with(|| {
+            rank_score(sev_index, &bt, &bf).cmp(&rank_score(sev_index, &at, &af))
+        })
     });
 
     // 3. Per-probe cap.
@@ -148,6 +185,11 @@ pub struct RequestBudget {
     remaining: AtomicUsize,
     unlimited: bool,
     hit: AtomicBool,
+    /// Optional per-probe fair-share cap (`usize::MAX` = none). Prevents an early fan-out probe
+    /// (e.g. `sql-injection`) from draining the whole global budget before later probes
+    /// (e.g. `os-command-injection`) get a turn. Set via [`RequestBudget::start_probe`].
+    probe_cap: AtomicUsize,
+    probe_used: AtomicUsize,
 }
 
 impl RequestBudget {
@@ -157,27 +199,48 @@ impl RequestBudget {
                 remaining: AtomicUsize::new(0),
                 unlimited: true,
                 hit: AtomicBool::new(false),
+                probe_cap: AtomicUsize::new(usize::MAX),
+                probe_used: AtomicUsize::new(0),
             },
             Some(n) => Self {
                 remaining: AtomicUsize::new(n),
                 unlimited: false,
                 hit: AtomicBool::new(false),
+                probe_cap: AtomicUsize::new(usize::MAX),
+                probe_used: AtomicUsize::new(0),
             },
         }
     }
 
-    /// Claim one request slot. Returns `false` (without consuming) once the budget is spent,
-    /// signalling the caller to stop sending and record what it skipped.
+    /// Begin a fan-out probe with an optional fair-share request cap. Resets the per-probe
+    /// counter. `None` clears the cap (probe limited only by the global budget).
+    pub fn start_probe(&self, cap: Option<usize>) {
+        self.probe_cap.store(cap.unwrap_or(usize::MAX), Ordering::Relaxed);
+        self.probe_used.store(0, Ordering::Relaxed);
+    }
+
+    /// Claim one request slot. Returns `false` (without consuming) once the global budget is
+    /// spent or the current probe's fair share is used up, signalling the caller to stop and
+    /// record what it skipped. (Sequential audit → `Relaxed` is sufficient.)
     pub fn try_consume(&self) -> bool {
-        if self.unlimited {
-            return true;
-        }
-        let cur = self.remaining.load(Ordering::Relaxed);
-        if cur == 0 {
-            self.hit.store(true, Ordering::Relaxed);
+        // Per-probe fair-share cap: reaching it stops this probe but is not a global "hit".
+        let cap = self.probe_cap.load(Ordering::Relaxed);
+        if cap != usize::MAX && self.probe_used.load(Ordering::Relaxed) >= cap {
             return false;
         }
-        self.remaining.store(cur - 1, Ordering::Relaxed);
+
+        if !self.unlimited {
+            let cur = self.remaining.load(Ordering::Relaxed);
+            if cur == 0 {
+                self.hit.store(true, Ordering::Relaxed);
+                return false;
+            }
+            self.remaining.store(cur - 1, Ordering::Relaxed);
+        }
+        if cap != usize::MAX {
+            self.probe_used
+                .store(self.probe_used.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        }
         true
     }
 
