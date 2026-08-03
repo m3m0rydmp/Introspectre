@@ -23,7 +23,6 @@ Designed for security researchers and penetration testers, Introspectre emphasiz
 - [Quickstart](#quickstart)
 - [Command Reference](#command-reference)
 - [Configuration](#configuration)
-- [Publishing to crates.io (maintainers)](#publishing-to-cratesio-maintainers)
 - [Legal & Ethical Use](#legal--ethical-use)
 - [License](#license)
 
@@ -199,37 +198,6 @@ On a schema with hundreds of mutations and thousands of fields, active probing c
 | [CHANGELOG.md](./CHANGELOG.md) | Release history. |
 
 Internal design/research/roadmap notes live in [`docs/`](./docs/README.md) (not shipped with the crate).
-
----
-
-## Publishing to crates.io (maintainers)
-
-Publishing to [crates.io](https://crates.io) is separate from pushing to GitHub, and it is **irreversible**: the crate name is claimed permanently, and a published version can only be *yanked* (hidden from new dependents), never deleted.
-
-**Prerequisites**
-- A crates.io account (sign in with GitHub) and a crates.io **API token** (Account Settings → API Tokens). This is a crates.io token — a GitHub token does **not** work for `cargo publish`.
-- On Windows, build with the MinGW/GNU toolchain on `PATH` (this repo has no MSVC): `$env:Path = "$env:USERPROFILE\mingw64\bin;$env:Path"`.
-
-**Steps**
-1. Bump `version` in `Cargo.toml` (SemVer) and add matching entries to `CHANGELOG.md` and the version line near the top of this README. The CLI banner reads the crate version automatically.
-2. Verify the package contents — confirm private files are excluded (`docs/*` and `resources/*` are excluded via `Cargo.toml`; the packaged tree should contain `src/**`, `Cargo.toml`, `README.md`, `LICENSE`, and the public root docs):
-   ```bash
-   cargo package --list
-   ```
-3. Dry-run (packages and builds from the packaged tree, uploads nothing):
-   ```bash
-   cargo publish --dry-run
-   ```
-4. Authenticate and publish:
-   ```bash
-   cargo login <your-crates-io-token>
-   cargo publish
-   ```
-
-If a bad version ships, `cargo yank --version X.Y.Z` stops new projects from depending on it (existing users are unaffected). Prefer not to publish at all? Users can install straight from Git without a crates.io release:
-```bash
-cargo install --git https://github.com/m3m0rydmp/Introspectre
-```
 
 ---
 
