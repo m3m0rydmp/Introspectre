@@ -157,7 +157,7 @@ pub async fn probe_introspection_matrix(
 
 /// Best-effort detection of an exposed in-browser GraphQL IDE. Tries the endpoint itself and a few
 /// sibling paths with a plain `GET` (`Accept: text/html`), and matches well-known IDE markers in the
-/// returned HTML. Returns `(url, ide_name)` on the first hit. Any supplied headers (e.g. `--cookie`)
+/// returned HTML. Returns `(url, ide_name)` on the first hit. Any supplied headers (e.g. `--challenge-cookie`)
 /// are forwarded, so an IDE gated behind a cookie/session is still detectable when the operator has one.
 async fn detect_ide(
     client: &Client,

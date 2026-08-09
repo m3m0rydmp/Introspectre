@@ -31,7 +31,7 @@ pub struct BotWall {
 fn session_hint(cookies: &str) -> String {
     format!(
         "Pass the challenge once in a real browser, then reuse that session: copy the \
-         relevant cookies (e.g. {cookies}) into `--cookie \"<paste>\"`, or capture the \
+         relevant cookies (e.g. {cookies}) into `--challenge-cookie \"<paste>\"`, or capture the \
          GraphQL request as a HAR and pass `--seed-traffic <file.har>` (its cookies/auth \
          headers are replayed automatically). This is not something the tool can bypass \
          on its own."
@@ -153,7 +153,7 @@ mod tests {
         let h = hdr(&[("server", "cloudflare"), ("set-cookie", "__cf_bm=abc; Path=/")]);
         let w = detect_bot_wall(403, &h, body).expect("should detect");
         assert_eq!(w.vendor, "PerimeterX / HUMAN");
-        assert!(w.hint.contains("--cookie"));
+        assert!(w.hint.contains("--challenge-cookie"));
     }
 
     #[test]
