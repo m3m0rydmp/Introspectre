@@ -4,14 +4,14 @@ All notable changes to Introspectre are summarized here at a high level. For the
 
 ## [1.15.3] - 2026-08-10
 
-### Fix: `-H "Cookie: …"` now strips the `Cookie:` prefix automatically
-* When copying a cookie header from browser dev tools (`Cookie: session=abc; token=xyz`) and passing it
-  via `-H`, the `Cookie:` prefix was treated as part of the header **name** (e.g. `Cookie: session`),
-  producing an invalid HTTP header that reqwest rejected before any request went out. The
-  `--challenge-cookie` flag already had smart prefix-stripping (v1.15.1), but `-H` headers bypassed it.
-* **Fix:** `parse_extra_headers` and `parse_header_kv` now detect a leading `Cookie:`/`cookie:` prefix
-  in the header name and normalize it to `Cookie`, keeping the value intact. Both `-H "Cookie: a=b"`
-  and `-H "Cookie=a=b"` now produce the same correct header. (`src/utils.rs`, `src/audit/utils.rs`)
+### Fix: `-H` header parsing now handles colon-delimited headers correctly
+* When passing a header copied from browser dev tools via `-H` (e.g. `Cookie: name=val; name2=val2`,
+  `Authorization: Basic dXNlcjpwYXNz`), the old `=`-only split produced an invalid header name
+  containing spaces and colons, which reqwest rejected before any request went out.
+* **Fix:** `parse_header_kv` now detects whether a `-H` value uses `:` or `=` as the header separator
+  (whichever appears first). Colón-delimited values like `Cookie: a=b; c=d` and `Authorization: Bearer
+  base64==` are split on the colón, keeping the value intact. Both `-H "Cookie: a=b"` and
+  `-H "Cookie=a=b"` now produce the same correct header. (`src/utils.rs`, `src/audit/utils.rs`)
 
 ### UX: `scan --injection` / `scan --chain` now gives a clear error
 * `--injection` and `--chain` are `audit`-only flags. Using them with `scan` (or `brute`/`file`)
