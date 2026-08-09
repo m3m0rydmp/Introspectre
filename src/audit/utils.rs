@@ -164,14 +164,7 @@ pub struct ProbeResponse {
 }
 
 pub fn parse_header_kv(value: &str) -> Option<(String, String)> {
-    let mut parts = value.splitn(2, '=');
-    let key = parts.next().unwrap_or("").trim();
-    let val = parts.next().unwrap_or("").trim();
-    if key.is_empty() {
-        None
-    } else {
-        Some((key.to_string(), val.to_string()))
-    }
+    crate::utils::parse_header_kv(value)
 }
 
 pub fn effective_headers(

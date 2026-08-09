@@ -2,6 +2,43 @@
 
 All notable changes to Introspectre are summarized here at a high level. For the full command/flag surface, see [USAGE.md](./USAGE.md).
 
+## [1.15.3] - 2026-08-10
+
+### Fix: `-H "Cookie: …"` now strips the `Cookie:` prefix automatically
+* When copying a cookie header from browser dev tools (`Cookie: session=abc; token=xyz`) and passing it
+  via `-H`, the `Cookie:` prefix was treated as part of the header **name** (e.g. `Cookie: session`),
+  producing an invalid HTTP header that reqwest rejected before any request went out. The
+  `--challenge-cookie` flag already had smart prefix-stripping (v1.15.1), but `-H` headers bypassed it.
+* **Fix:** `parse_extra_headers` and `parse_header_kv` now detect a leading `Cookie:`/`cookie:` prefix
+  in the header name and normalize it to `Cookie`, keeping the value intact. Both `-H "Cookie: a=b"`
+  and `-H "Cookie=a=b"` now produce the same correct header. (`src/utils.rs`, `src/audit/utils.rs`)
+
+### UX: `scan --injection` / `scan --chain` now gives a clear error
+* `--injection` and `--chain` are `audit`-only flags. Using them with `scan` (or `brute`/`file`)
+  previously produced clap's generic `unexpected argument` error with no hint. Now the tool prints a
+  friendly message: `--injection is only available with the audit command.` and exits. (`src/main.rs`)
+
+### Guard: injection probes skipped when no schema is available
+* When `audit` can't obtain a schema (introspection blocked, type-walk fails, no `--use-schema`), it
+  continues with an empty schema so schema-independent probes (CSRF, CORS, APQ, etc.) can still run.
+  But injection probes (SQLi, XSS, SSRF, CMDI) were also dispatched — building zero targets and
+  silently no-op'ing, with XSS wasting one context request. Now injection probes are explicitly
+  skipped with a clear warning: `Injection probes skipped: no schema available …`. (`src/audit/mod.rs`)
+
+## [1.15.2] - 2026-08-10
+
+### Fix: `audit` now negotiates transport when `--transport auto` (matching `scan`)
+* When `--transport auto` (the default), `audit` was hardcoded to `POST/JSON` and never probed for
+  the actual working transport — unlike `scan --probe-first`, which negotiated PostJson → Get → Form
+  via a lightweight `__typename` knock. On endpoints that only answer GET or form-encoded requests,
+  every `__type`-walk query in audit silently failed (0 types reconstructed), and audit continued
+  with an empty schema reporting "schema-independent probes only." Scan succeeded because the probe
+  had already selected the correct transport.
+* **Fix:** the `Audit` command now runs the same endpoint probe when `--transport auto`, so
+  `resolved_transport` reflects the transport the server actually accepts. The type-walk and all
+  active probes then use that negotiated transport. One extra `{ __typename }` request per audit
+  run; no new flags or config. (`src/main.rs` audit arm)
+
 ## [1.15.1] - 2026-08-10
 
 ### Fix: `--challenge-cookie` accepts both raw cookies and `Cookie: …` header values

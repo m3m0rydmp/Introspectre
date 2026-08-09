@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "introspectre"
-version = "1.15.1"
+version = "1.15.3"
 dependencies = [
  "axum",
  "base64",
