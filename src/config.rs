@@ -162,6 +162,11 @@ pub struct AuditConfig {
     pub seeds: HashMap<String, String>,
     #[serde(default)]
     pub custom_payloads: Vec<String>,
+    /// Out-of-band collaborator domain/URL (Burp Collaborator / interactsh / `*.oast.fun`). When set,
+    /// SSRF probing fires payloads with per-target subdomain markers so a DNS/HTTP hit in the
+    /// collaborator confirms blind SSRF (the reliable path when timing is inconclusive). Set via `--oob-url`.
+    #[serde(default)]
+    pub oob_url: Option<String>,
     /// Default per-probe target cap (overridden by `--max-targets`). `None` = auto-cap
     /// large schemas; `Some(0)` = unlimited.
     #[serde(default)]
@@ -192,6 +197,7 @@ impl Default for AuditConfig {
             test_alias_dos: true,
             seeds: HashMap::new(),
             custom_payloads: Vec::new(),
+            oob_url: None,
             max_targets_per_probe: None,
             max_total_requests: None,
             max_type_walk_types: default_max_type_walk(),
@@ -249,11 +255,25 @@ fn default_ssrf_args() -> PatternNames {
     PatternNames {
         names: vec![
             "url",
+            "uri",
             "webhook",
             "callback",
             "redirect",
             "endpoint",
             "image_url",
+            // host/target style sinks (e.g. connectivity/import/fetch resolvers)
+            "host",
+            "hostname",
+            "domain",
+            "server",
+            "target",
+            "dest",
+            "destination",
+            "proxy",
+            "fetch",
+            "link",
+            "resource",
+            "remote",
         ]
         .into_iter()
         .map(str::to_string)

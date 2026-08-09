@@ -2,6 +2,97 @@
 
 All notable changes to Introspectre are summarized here at a high level. For the full command/flag surface, see [USAGE.md](./USAGE.md).
 
+## [1.15.1] - 2026-08-10
+
+### Fix: `--challenge-cookie` accepts both raw cookies and `Cookie: …` header values
+* `--challenge-cookie` now detects and strips a leading `Cookie:` / `cookie:` prefix, so both
+  `--challenge-cookie "id=abc; token=xyz"` and `--challenge-cookie "Cookie: id=abc; token=xyz"`
+  (as copied from browser dev tools) work correctly. Previously the `Cookie:` form produced a
+  malformed `Cookie=Cookie: …` header and a 403. The `-H` flag remains `Name=Value` format.
+
+## [1.15.0] - 2026-08-10
+
+### CLI: `--cookie` renamed to `--challenge-cookie`
+* The bot-wall session-reuse flag is now `--challenge-cookie` — it exists for **WAF/bot-wall challenge
+  bypass** (`cf_clearance`, `_px3`, `__cf_bm`, …), where you paste cookies captured from a browser
+  session that already passed the challenge. Ordinary session/auth headers remain the job of
+  `-H`/`--header` (`Authorization: Bearer ...`, `Cookie: ...`).
+* The old `--cookie` spelling is removed (no alias). Update any scripts/aliases.
+
+## [1.14.0] - 2026-08-04
+
+### Blind (error-suppressed) SQL-injection detection
+* New **error-differential quote-balance** check confirms SQL injection even when the server hides the
+  database error (a generic `500`/empty response). For a string argument whose benign value succeeds, a
+  lone `'` that **breaks** the query while a balanced `''` **recovers** it is a definitive injection
+  signature (`sql-injection-blind` finding). By construction it stays silent on parameterized backends
+  (which error on neither quote), so it does not reintroduce false positives. *(Caught the deliberately
+  error-suppressed `dogs(namePrefix)` SQLi in the OWASP poc-graphql lab; silent on Hasura; DVGA's
+  error-based SQLi still confirmed.)*
+
+### SSRF: detect host-style sinks (not just URL args)
+* The passive SSRF-surface list now includes host/target-style argument names (`host`, `hostname`,
+  `domain`, `server`, `target`, `dest`, `proxy`, `fetch`, …), so connectivity/import resolvers are
+  flagged — previously only `url`/`webhook`-style names were. The active probe adds **bare host/IP**
+  payloads (e.g. `169.254.169.254`, `10.255.255.1`) for host args, **seeds sibling args**
+  (`scheme=http`/`port=80`/`path=/`) so multi-arg fetchers actually issue the request, and treats a
+  **payload-induced request timeout** (a hung outbound) as an SSRF signal.
+* **Out-of-band confirmation (`--oob-url`).** Point the audit at a collaborator domain (Burp
+  Collaborator / interactsh / `*.oast.fun`) and the SSRF probe fires payloads carrying a **per-argument
+  DNS marker** (`<field>-<arg>.<collaborator>`, in both bare-host and full-URL form). A DNS or HTTP hit in
+  your collaborator confirms blind SSRF and pinpoints the exact argument — the reliable path when timing
+  is inconclusive (a DNS lookup alone is proof). *(Verified against DVGA `importPaste`: the marker
+  `importpaste-host.<collab>` produced a collaborator DNS interaction.)*
+
+### XSS probe: sees nested reflections, reports leads without false positives
+* The reflection probe now sends **variable-based** payloads with a **reflective selection set** (all
+  no-arg scalar fields of the return type plus one level into nested objects), so a value echoed in a
+  wrapper result — e.g. a mutation returning `{ paste { content } }` — is actually observed (the old
+  `{ __typename }` selection hid it).
+* Reflection in a **JSON** response is now reported as a **Low, "potential stored/DOM XSS — verify HTML
+  sink" lead** (`xss-reflected-input`) rather than treated as confirmed XSS — because echoing a script in
+  an `application/json` body is not itself exploitable. Only reflection in a response actually **served as
+  HTML** is a confirmed High. *(DVGA's `createPaste(content)` echo now surfaces as one lead, zero false
+  positives.)*
+
+### OS command injection: structured payloads for parsed inputs
+* The time-based OS-command-injection probe now also sends **structured** payloads that survive inputs
+  parsed before the shell — `host:port`-prefixed variants (`127.0.0.1:80; sleep 5`, …) and, when a seed
+  is known for the argument, `<seed>; sleep 5`. This catches blind command injection in connectivity-style
+  sinks (e.g. `host,port = ip.split(':'); os.system(...)`) that a bare `; sleep 5` misses. *(Confirms the
+  blind `isSqlUp(ip)` cmdi in graphql-security-labs; DVGA's `systemDebug` cmdi still confirmed.)*
+
+### NoSQL operator-injection detection (JSON/custom-scalar args)
+* New detector for MongoDB-style operator injection: probes **custom-scalar arguments** (JSON and other
+  non-standard scalars, where operator objects can live — standard `String/Int/…` args can't carry one)
+  with `{"$ne":null}` / `{"$gt":""}` / `{"$regex":".*"}` and confirms on a **benign-vs-operator
+  differential** (the operator must be accepted, return data differing from a benign literal, and that data
+  must be non-empty). Emits `nosql-injection` (Critical). By construction it can't fire on a
+  parameterized backend (the operator errors or is treated as a literal). *(Caught a `{"$ne":null}` auth
+  bypass in a MongoDB+Apollo lab; silent on Hasura; DVGA SQLi unaffected.)*
+
+### Better injection-sink ranking (true-positive reliability under a budget)
+* SQLi target ranking is now **weighted**: filter/search/ordering parameters (`filter`, `search`,
+  `where`, `like`, `prefix`, `order`, …) count double a generic identifier field (`id`, `name`, `user`),
+  so a real sink is probed **first** and isn't starved when the fair-share `--max-requests` budget is
+  tight. *(A full `--max-requests 900` audit of poc-graphql now catches the `dogs(namePrefix)` SQLi it
+  previously missed under the same budget.)*
+
+### Fix: SQL-injection false positives on parameterized / Hasura filters
+* **Strict database-error matching.** The error-based SQLi confirmation no longer fires on generic
+  words (`column`, `table`, `relation`, `database`, `unexpected token`, or bare `$ne/$gt/$in/$regex`)
+  that appear in ordinary GraphQL/Hasura/Postgres **validation, type-coercion, and permission** errors.
+  It now matches only high-signal database-engine/driver markers (`sqlstate`, `syntax error at or near`,
+  `unterminated quoted string`, `unrecognized token`, `operationalerror`, `psycopg2`, `sqlite3.`, …).
+* **Baseline differential.** A finding is confirmed only when the payload triggers a database error the
+  **dummy baseline did not** — so a field that rejects *any* malformed input (every parameterized filter)
+  is no longer mistaken for an injection. A reflection guard also prevents matching our own echoed payload.
+* **Hasura-aware.** Parameterized comparison-operator arguments (`where…._eq/_ilike/_similar/…`) are
+  skipped by default (with a summary note) — they are parameterized filters, not string-concat sinks.
+* **Collapsed findings.** At most one finding per `root.field` instead of one per operator/column.
+* *Verified against a local Hasura+Postgres lab (0 false positives; 434 comparison-operator args skipped)
+  and DVGA (genuine `Query.pastes(filter)` SQLi still confirmed).*
+
 ## [1.13.5] - 2026-08-04
 
 ### Docs: quick-start cheat-sheet

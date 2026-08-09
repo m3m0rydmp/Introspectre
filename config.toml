@@ -2,7 +2,7 @@
 names = ["email", "username", "phone", "mpin", "wallet_id", "mobile_number"]
 
 [patterns.ssrf_args]
-names = ["url", "webhook", "callback", "redirect", "endpoint", "image_url"]
+names = ["url", "uri", "webhook", "callback", "redirect", "endpoint", "image_url", "host", "hostname", "domain", "server", "target", "dest", "destination", "proxy", "fetch", "link", "resource", "remote"]
 
 [patterns.idor_mutations]
 prefixes = ["delete", "remove", "update", "download", "export"]

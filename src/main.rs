@@ -36,7 +36,7 @@ use types::ReportMeta;
 
 /// Merge the base `--header` list with session-reuse layers: HAR/Burp session
 /// headers (`--seed-traffic`), same-origin `Origin`/`Referer` (`--stealth`), and
-/// a raw `--cookie`. Base `--header` entries win on a name conflict. Returns
+/// a raw `--challenge-cookie`. Base `--header` entries win on a name conflict. Returns
 /// `key=value` strings for the existing header pipeline. This is what lets a
 /// researcher reuse a browser session to get past a bot-management WAF.
 fn effective_headers(base: &[String], cli: &Cli, url: &str) -> Vec<String> {
@@ -48,7 +48,15 @@ fn effective_headers(base: &[String], cli: &Cli, url: &str) -> Vec<String> {
         layers.extend(crate::io_ops::same_origin_headers(url));
     }
     if let Some(c) = &cli.cookie {
-        layers.push(format!("Cookie={}", c));
+        // Strip a leading "Cookie:" or "cookie:" prefix if the operator pasted
+        // the full header value (e.g. copied from browser dev tools as-is).
+        let trimmed = c.trim();
+        let value = if trimmed.len() > 7 && trimmed[..7].eq_ignore_ascii_case("Cookie:") {
+            trimmed[7..].trim()
+        } else {
+            trimmed
+        };
+        layers.push(format!("Cookie={}", value));
     }
     layers.extend(base.iter().cloned());
     // Dedupe by header name (case-insensitive); later layers (higher priority) win.
@@ -170,6 +178,11 @@ async fn main() {
     if let Err(e) = config.merge_wordlists(&cli.wordlist) {
         eprintln!("{} {}", "  ✗ Error:".red().bold(), e);
         std::process::exit(1);
+    }
+
+    // Out-of-band collaborator for blind-SSRF confirmation (CLI overrides config).
+    if let Some(oob) = &cli.oob_url {
+        config.audit.oob_url = Some(oob.clone());
     }
 
     // Merge manual seeds

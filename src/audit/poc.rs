@@ -1,6 +1,16 @@
 use crate::types::{AffectedLocation, Finding, GqlSchema};
 use serde_json::json;
 
+/// Truncate a response body string to `max_len` characters for inclusion in
+/// evidence blocks. Appends "…" when truncated.
+pub fn truncated_body(raw: &str, max_len: usize) -> String {
+    if raw.len() <= max_len {
+        raw.to_string()
+    } else {
+        format!("{}…", &raw[..max_len])
+    }
+}
+
 /// Injection finding ids that sqlmap can take further (SQL/NoSQL).
 const SQLMAP_TARGET_IDS: &[&str] = &["sql-injection", "sql-injection-inline", "blind-injection"];
 

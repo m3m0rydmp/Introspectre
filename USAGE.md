@@ -46,7 +46,7 @@ introspectre audit URL --exit-zero                       # don't fail the shell/
 
 **Behind a WAF / bot wall (reuse a real browser session)**
 ```bash
-introspectre scan URL --cookie "_px3=...; cf_clearance=..."    # paste challenge-passed cookies
+introspectre scan URL --challenge-cookie "_px3=...; cf_clearance=..."  # paste challenge-passed cookies
 introspectre scan URL --seed-traffic ./session.har --stealth  # replay captured session + browser headers
 introspectre scan URL --transport get                         # try an alternate transport if POST is blocked
 ```
@@ -195,7 +195,7 @@ A bot wall like this **cannot be bypassed by the tool on its own** — that woul
 
 ```bash
 # (a) paste the session cookies directly:
-introspectre scan https://target.com/graphql --cookie "_px3=...; __cf_bm=...; cf_clearance=..."
+introspectre scan https://target.com/graphql --challenge-cookie "_px3=...; __cf_bm=...; cf_clearance=..."
 
 # (b) or capture the GraphQL request as a HAR and let the tool replay its cookies/auth headers:
 introspectre scan https://target.com/graphql --seed-traffic ./session.har
@@ -420,6 +420,7 @@ If a large schema still feels busy, keep **Scalars: hidden** on, use the search 
 | `--seeds <FILE>` | Provide known-good values via JSON, matched **by argument/input-field name or by type name** (arg-name wins). E.g. `{"username":"admin","password":"changeme","UserID":"\"u-1\""}` — supply real credentials/tokens/ids so auth-gated sinks can be reached. Injection payloads still override seeds. |
 | `--verbose` | Include extra detail (e.g., PoC blocks) in text output. |
 | `--exit-zero` | Always exit `0`, even when High/Medium findings are present (suppresses the CI "findings gate"). Useful for interactive or chained runs; the report is unchanged. |
+| `--oob-url <DOMAIN>` | Out-of-band collaborator domain (Burp Collaborator / interactsh / `*.oast.fun`). The SSRF probe fires payloads with a per-argument DNS marker (`<field>-<arg>.<domain>`); a DNS/HTTP hit in your collaborator confirms blind SSRF and identifies the sink. The reliable path when timing is inconclusive. |
 
 ### `scan`-specific flags
 

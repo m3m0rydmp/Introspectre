@@ -110,9 +110,23 @@ pub const CMDI_KEYWORDS: &[&str] = &[
     "cmd", "command", "exec", "run", "shell", "ping", "host", "hostname", "debug", "diag",
     "diagnostic", "system", "os", "proc", "process", "spawn", "subprocess", "bash", "sh",
 ];
-pub const SQLI_KEYWORDS: &[&str] = &[
-    "filter", "query", "search", "where", "order", "sort", "id", "name", "email", "user", "login",
+/// Strong SQL-injection sink signals: filter / search / ordering parameters that are far more
+/// likely to be concatenated into a query than a generic identifier field.
+pub const SQLI_SINK_KEYWORDS: &[&str] = &[
+    "filter", "search", "where", "query", "like", "ilike", "prefix", "contains", "startswith",
+    "lookup", "find", "keyword", "term", "slug", "order", "sort", "orderby", "match",
 ];
+/// Weaker signals: identifier/field names that *might* be a sink but are common everywhere.
+pub const SQLI_FIELD_KEYWORDS: &[&str] = &[
+    "id", "name", "email", "user", "login", "username", "handle",
+];
+
+/// Weighted SQLi name-affinity: a filter/search/order token counts double a generic field token,
+/// so a real sink (e.g. `dogs(namePrefix)` → `prefix`+`name` = 3) outranks a reflective identifier
+/// arg (e.g. `auth(veterinaryName)` → `name` = 1) and is reached first under a tight request budget.
+pub fn sqli_affinity(haystack: &str) -> i32 {
+    2 * name_affinity(haystack, SQLI_SINK_KEYWORDS) + name_affinity(haystack, SQLI_FIELD_KEYWORDS)
+}
 pub const XSS_KEYWORDS: &[&str] = &[
     "html", "content", "body", "message", "comment", "title", "description", "bio", "name", "text",
 ];

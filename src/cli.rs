@@ -53,10 +53,12 @@ pub struct Cli {
     pub stealth: bool,
 
     /// Reuse a browser session by sending a raw Cookie header on every request.
-    /// Paste the cookies from an authenticated/challenge-passed browser session,
-    /// e.g. --cookie "_px3=...; __cf_bm=...". Needed for endpoints behind
-    /// bot-management WAFs (PerimeterX, Cloudflare, Akamai, …).
-    #[arg(long, global = true, value_name = "STRING")]
+    /// Paste the cookies from a browser session that already passed the bot-wall
+    /// challenge, e.g. --challenge-cookie "_px3=...; __cf_bm=...". Needed for
+    /// endpoints behind bot-management WAFs (PerimeterX, Cloudflare, Akamai, …).
+    /// For ordinary session/auth headers (`Authorization: Bearer ...`, a signed
+    /// `Cookie: ...`) use `-H`/`--header "Name=Value"` instead.
+    #[arg(long = "challenge-cookie", global = true, value_name = "STRING")]
     pub cookie: Option<String>,
 
     /// Clear this target's cached scan before running, forcing a fresh fetch.
@@ -119,6 +121,12 @@ pub struct Cli {
     /// "findings gate" so interactive or chained runs aren't treated as a failed command.
     #[arg(long, global = true, default_value_t = false)]
     pub exit_zero: bool,
+
+    /// Out-of-band collaborator domain/URL (Burp Collaborator / interactsh / `*.oast.fun`). When set,
+    /// the SSRF probe fires payloads with per-target subdomain markers; a DNS/HTTP hit in your
+    /// collaborator confirms blind SSRF. Example: --oob-url abc123.oast.fun
+    #[arg(long, global = true, value_name = "DOMAIN")]
+    pub oob_url: Option<String>,
 }
 
 #[derive(Subcommand)]

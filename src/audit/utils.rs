@@ -423,53 +423,67 @@ pub fn is_validation_error(message: &str) -> bool {
     .any(|s| m.contains(s))
 }
 
+/// High-signal markers that only appear when a **database engine or driver actually
+/// chokes on SQL/NoSQL** — a broken query, a syntax error, a driver-level exception.
+///
+/// Deliberately **strict**: generic words like `column`, `table`, `relation`, `database`,
+/// `unexpected token`, and the bare NoSQL operator tokens (`$ne`/`$gt`/`$in`/`$regex`) were
+/// removed because they also appear in ordinary GraphQL/Hasura/Postgres **validation,
+/// type-coercion, and permission** errors (e.g. `invalid input syntax for type integer`,
+/// `parsing Text failed`, `permission denied for relation …`). Matching those produced mass
+/// false positives against parameterized backends (Hasura). Confirmation additionally requires
+/// a baseline differential (the dummy request must NOT already produce the same error) — see the
+/// SQLi probe — so a field that rejects any malformed input is not mistaken for an injection.
+const SQL_ENGINE_ERROR_MARKERS: &[&str] = &[
+    // Cross-engine SQLSTATE + syntax breakage
+    "sqlstate",
+    "syntax error at or near",              // PostgreSQL
+    "unterminated quoted string",           // PostgreSQL
+    "unterminated quoted identifier",       // PostgreSQL
+    "you have an error in your sql syntax", // MySQL / MariaDB
+    "check the manual that corresponds to your", // MySQL / MariaDB
+    "unclosed quotation mark",              // MSSQL
+    "incorrect syntax near",                // MSSQL
+    "quoted string not properly terminated", // Oracle
+    "unrecognized token",                   // SQLite
+    "near \"",                              // SQLite / others: near "X": syntax error
+    "warning: sqlite",                      // PHP SQLite
+    "pg_sleep",
+    "dbms_pipe",
+    // Driver / library exception names (only surface when the DB layer itself errors)
+    "operationalerror",                     // Python DB-API (sqlite3/psycopg2)
+    "programmingerror",
+    "psycopg2",
+    "pg8000",
+    "pymysql",
+    "sqlalchemy",
+    "sqlite3.",
+    "pdoexception",
+    "org.postgresql",
+    "java.sql.sqlexception",
+    "system.data.sqlclient",
+    // NoSQL engine / driver markers (engine-specific, NOT the bare $operator tokens)
+    "mongoservererror",
+    "mongoerror",
+    "mongodb.driver",
+    "bsonobj",
+];
+
 pub fn is_sql_error(message: &str) -> bool {
     let m = message.to_lowercase();
-    [
-        "sqlstate",
-        "mysql",
-        "postgresql",
-        "sqlite",
-        "column",
-        "table",
-        "database",
-        "relation",
-        "pg_sleep",
-        "dbms_pipe",
-        "near \"'\"",
-        "unterminated quoted string",
-        "you have an error in your sql syntax",
-        "check the manual that corresponds to your mariadb server",
-        // Python / SQLAlchemy / PHP patterns
-        "pymysql",
-        "sqlalchemy",
-        "sqlite3",
-        "pdoexception",
-        "psycopg2",
-        "pg8000",
-        // NoSQL / MongoDB patterns
-        "mongodb",
-        "mongodb.driver",
-        "bsonobj",
-        "nosql",
-        "documentdb",
-        "cursorid",
-        "$gt",
-        "$ne",
-        "$in",
-        "$regex",
-        "canonicalize",
-        "nedb",
-        "nedb-core",
-        // Generic DB / JS patterns
-        "objectid",
-        "invalid object id",
-        "cast to number failed",
-        "cast to string failed",
-        "unexpected token",
-    ]
-    .iter()
-    .any(|s| m.contains(s))
+    SQL_ENGINE_ERROR_MARKERS.iter().any(|s| m.contains(s))
+}
+
+/// Like [`is_sql_error`], but first removes any occurrence of the raw injected `payload`
+/// from the message — so a server that merely **echoes our payload** back in its error
+/// (e.g. reflecting `{"$ne": null}`) can't be mistaken for a database-driver error.
+pub fn is_sql_error_excluding_payload(message: &str, payload: &str) -> bool {
+    let cleaned = if payload.trim().is_empty() {
+        message.to_lowercase()
+    } else {
+        message.to_lowercase().replace(&payload.to_lowercase(), " ")
+    };
+    SQL_ENGINE_ERROR_MARKERS.iter().any(|s| cleaned.contains(s))
 }
 
 pub fn field_non_null_data(data: &Option<Value>, field_name: &str) -> Option<Value> {
@@ -508,6 +522,53 @@ pub fn base_selection(schema: &GqlSchema, field: &GqlField) -> String {
         Some("OBJECT") | Some("INTERFACE") | Some("UNION") => "{ __typename }".to_string(),
         _ => String::new(),
     }
+}
+
+/// A selection set that pulls back the fields most likely to **echo an injected value** — every
+/// no-argument scalar/enum field of the return type, plus one level into nested object fields'
+/// scalars. Used by the XSS reflection probe so a payload stored in e.g. a wrapper result's
+/// `paste { content }` is actually present in the response (the default `{ __typename }` hides it).
+/// Returns an empty string for scalar-returning fields (their value is already in the response).
+pub fn reflective_selection(schema: &GqlSchema, field: &GqlField) -> String {
+    match field_kind(schema, field).as_deref() {
+        Some("OBJECT") | Some("INTERFACE") | Some("UNION") => {}
+        _ => return String::new(),
+    }
+    match field_type_name(schema, field) {
+        Some(tn) => reflective_for_type(schema, &tn, 1),
+        None => base_selection(schema, field),
+    }
+}
+
+fn reflective_for_type(schema: &GqlSchema, type_name: &str, depth: u8) -> String {
+    let fields = schema.fields_for_type(Some(type_name));
+    if fields.is_empty() {
+        return "{ __typename }".to_string();
+    }
+    let mut sel: Vec<String> = vec!["__typename".to_string()];
+    for f in fields.iter().take(30) {
+        // Skip fields that require arguments — they can't be selected without supplying values.
+        let has_required_args = f.args.as_ref().map_or(false, |args| {
+            args.iter().any(|a| {
+                a.arg_type.as_ref().map_or(false, |tr| tr.kind.as_deref() == Some("NON_NULL"))
+            })
+        });
+        if has_required_args {
+            continue;
+        }
+        match field_kind(schema, f).as_deref() {
+            Some("SCALAR") | Some("ENUM") => sel.push(f.name.clone()),
+            Some("OBJECT") if depth > 0 => {
+                if let Some(inner) = field_type_name(schema, f) {
+                    if inner != type_name {
+                        sel.push(format!("{} {}", f.name, reflective_for_type(schema, &inner, depth - 1)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    format!("{{ {} }}", sel.join(" "))
 }
 
 pub fn idor_selection(schema: &GqlSchema, field: &GqlField) -> String {
@@ -910,6 +971,41 @@ pub fn find_root_field<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_error_matches_real_engine_errors() {
+        // Genuine database-engine / driver failures — must be detected.
+        assert!(is_sql_error("SQLSTATE[42000]: Syntax error"));
+        assert!(is_sql_error("You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server"));
+        assert!(is_sql_error("ERROR: syntax error at or near \"'\""));
+        assert!(is_sql_error("unterminated quoted string at or near \"'\""));
+        assert!(is_sql_error("sqlite3.OperationalError: near \"foo\": syntax error"));
+        assert!(is_sql_error("sqlite3.OperationalError: unrecognized token: \"'\""));
+        assert!(is_sql_error("psycopg2.errors.SyntaxError: ..."));
+    }
+
+    #[test]
+    fn sql_error_ignores_validation_and_permission_errors() {
+        // Ordinary GraphQL/Hasura/Postgres validation, type-coercion, and permission errors —
+        // these are NOT injection and previously produced mass false positives.
+        assert!(!is_sql_error("invalid input syntax for type integer: \"'\""));
+        assert!(!is_sql_error("parsing Text failed, expected String, but encountered Object"));
+        assert!(!is_sql_error("permission denied for relation analytics_reports"));
+        assert!(!is_sql_error("field 'users' not found in type: 'query_root'"));
+        assert!(!is_sql_error("Syntax Error: Expected Name, found \"}\"")); // GraphQL parser
+        assert!(!is_sql_error("column \"foo\" specified more than once")); // generic 'column'
+    }
+
+    #[test]
+    fn sql_error_excluding_payload_ignores_reflected_payload() {
+        // A server that merely echoes our NoSQL payload must NOT self-match on `$ne`/`$gt`.
+        let err = "unexpected value {\"$ne\":null} for field";
+        // (no engine marker anyway, but the guard must also strip the echoed payload)
+        assert!(!is_sql_error_excluding_payload(err, "{\"$ne\":null}"));
+        // A real engine error that happens to contain the payload text is still caught.
+        let real = "sqlite3.OperationalError: near \"' OR 1=1\": syntax error";
+        assert!(is_sql_error_excluding_payload(real, "' OR 1=1"));
+    }
 
     #[test]
     fn obfuscation_preserves_core_and_differs() {
