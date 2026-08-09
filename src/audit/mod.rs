@@ -572,6 +572,17 @@ pub async fn run_audit(
     }
 
     if config.audit.test_injection {
+        // If the schema is empty (introspection blocked and no --use-schema),
+        // injection probes have nothing to target — skip them with a clear
+        // message. Schema-independent probes (typename, CSRF, CORS, APQ, etc.)
+        // still run.
+        let schema_available = !schema.types.is_empty()
+            && (schema.query_type.is_some() || schema.mutation_type.is_some());
+        if !schema_available {
+            warnings.push(
+                "Injection probes skipped: no schema available (introspection blocked and no --use-schema). There are no types/fields/args to target.".to_string(),
+            );
+        } else {
         if probe_enabled("ssrf", only, skip, no_dos, verbose) {
             warnings.push(
                 "SSRF probe safety warning: only run with explicit authorization from the target program."
@@ -732,6 +743,7 @@ pub async fn run_audit(
             if let Some(t) = &mut throttler { t.adjust(start.elapsed().as_millis()); }
             reported = report_new_confirmed(&confirmed, reported, verbose);
         }
+        } // close else (schema_available)
     }
 
     if config.audit.test_complexity {

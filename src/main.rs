@@ -119,7 +119,33 @@ fn print_banner(version: &str) {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = e.to_string();
+            let is_injection_err = msg.contains("--injection");
+            let is_chain_err = msg.contains("--chain");
+            // Only intercept when the flag is used on a non-audit subcommand
+            // (legitimate parse errors within `audit` still get clap's default).
+            if (is_injection_err || is_chain_err) && !msg.contains("audit") {
+                let flags = if is_injection_err && is_chain_err {
+                    "--injection and --chain are"
+                } else if is_injection_err {
+                    "--injection is"
+                } else {
+                    "--chain is"
+                };
+                eprintln!(
+                    "{} {} only available with the {} command.",
+                    "Error:".red().bold(),
+                    flags,
+                    "audit".bright_white().bold()
+                );
+                std::process::exit(2);
+            }
+            e.exit()
+        }
+    };
 
     // Global maintenance action: wipe the entire cache database. Runs with no subcommand,
     // behind a confirmation prompt.
@@ -239,10 +265,10 @@ async fn main() {
     }
 
     // Resolved transport used for introspection, auth discovery, and the active
-    // audit. `Auto` negotiation (see `probe_graphql_endpoint`) only runs for the
-    // `Scan` command when `--probe-first` is enabled; everywhere else (or when
-    // negotiation can't run) `Auto` simply falls back to `PostJson`, matching
-    // today's default POST/JSON behavior.
+    // audit. `Auto` negotiation (see `probe_graphql_endpoint`) runs for the `Scan`
+    // command when `--probe-first` is enabled and for the `Audit` command whenever
+    // transport is `Auto`; everywhere else (or when negotiation can't run) `Auto`
+    // falls back to `PostJson`, matching today's default POST/JSON behavior.
     let mut resolved_transport = if cli.transport == Transport::Auto {
         Transport::PostJson
     } else {
@@ -400,6 +426,43 @@ async fn main() {
                 ..
             } => {
                 let eff = effective_headers(headers, &cli, url);
+                // Negotiate transport when --transport auto so type-walk and probes
+                // use a transport the server actually accepts (mirrors scan --probe-first).
+                if cli.transport == Transport::Auto {
+                    if cli.verbose {
+                        println!("  {} Probing endpoint behavior with minimal __typename query...", "→".blue());
+                    }
+                    let probe = probe_graphql_endpoint(
+                        url,
+                        &eff,
+                        *timeout,
+                        *rate_limit_ms,
+                        cli.token.as_deref(),
+                        cli.user_agent.as_deref(),
+                        cli.stealth,
+                        cli.transport,
+                    )
+                    .await;
+                    match probe {
+                        Ok(p) if p.graphql_confirmed => {
+                            resolved_transport = p.resolved_transport;
+                            if cli.verbose {
+                                println!("  {} {} (HTTP {})", "✓".green().bold(), p.summary, p.http_status);
+                            }
+                        }
+                        Ok(p) => {
+                            resolved_transport = p.resolved_transport;
+                            if cli.verbose {
+                                eprintln!("  {} {} (HTTP {})", "!".yellow().bold(), p.summary, p.http_status);
+                            }
+                        }
+                        Err(e) => {
+                            if cli.verbose {
+                                eprintln!("  {} Probe failed: {}", "!".yellow().bold(), e);
+                            }
+                        }
+                    }
+                }
                 if cli.verbose {
                     println!("  {} Fetching introspection from {}...", "→".blue(), url);
                 }

@@ -109,19 +109,52 @@ pub fn user_types(schema: &GqlSchema) -> Vec<&GqlType> {
         .collect()
 }
 
+/// Parses a single `-H` header argument in either of two forms:
+///   `"Name: value"`   (standard HTTP header syntax, colon-separated)
+///   `"Name=value"`    (legacy shorthand, equals-separated)
+///
+/// Returns `None` if no header name can be extracted.
+pub fn parse_header_kv(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim();
+
+    // Prefer colon syntax if a colon appears before any '=' (or there is no
+    // '=' at all).  This naturally handles pasted dev-tools headers like
+    //   Cookie: name1=val1; name2=val2
+    // without the fragile post-hoc repair that `splitn(2, '=')` required.
+    let colon_idx = raw.find(':');
+    let eq_idx = raw.find('=');
+
+    let use_colon = match (colon_idx, eq_idx) {
+        (Some(c), Some(e)) => c < e,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+
+    if use_colon {
+        let idx = colon_idx.unwrap();
+        let key = raw[..idx].trim();
+        let val = raw[idx + 1..].trim();
+        if key.is_empty() {
+            return None;
+        }
+        return Some((key.to_string(), val.to_string()));
+    }
+
+    // Fall back to "Name=value"
+    let idx = eq_idx?;
+    let key = raw[..idx].trim();
+    let val = raw[idx + 1..].trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some((key.to_string(), val.to_string()))
+    }
+}
+
 pub fn parse_extra_headers(extra_headers: &[String]) -> Vec<(String, String)> {
     extra_headers
         .iter()
-        .filter_map(|kv| {
-            let mut parts = kv.splitn(2, '=');
-            let key = parts.next().unwrap_or("").trim();
-            let val = parts.next().unwrap_or("").trim();
-            if key.is_empty() {
-                None
-            } else {
-                Some((key.to_string(), val.to_string()))
-            }
-        })
+        .filter_map(|kv| parse_header_kv(kv))
         .collect()
 }
 
@@ -194,7 +227,7 @@ pub fn synthesize_value(field_name: &str, type_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_alias_cap, parse_did_you_mean};
+    use super::{parse_alias_cap, parse_did_you_mean, parse_extra_headers};
 
     #[test]
     fn did_you_mean_parsing() {
@@ -207,6 +240,52 @@ mod tests {
 
         // No suggestion at all.
         assert!(parse_did_you_mean("Cannot query field \"x\".").is_empty());
+    }
+
+    #[test]
+    fn cookie_header_prefix_is_normalized_and_name_restored() {
+        // Dev-tools paste form: "Cookie: name=val; name2=val2"
+        let headers = parse_extra_headers(&[
+            "Cookie: intercom-device-id-zlmaz2pu=780e2d45-901b; h1_device_id=dc400820".to_string(),
+        ]);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "Cookie");
+        // The first cookie name (intercom-device-id-zlmaz2pu) must be present
+        assert_eq!(
+            headers[0].1,
+            "intercom-device-id-zlmaz2pu=780e2d45-901b; h1_device_id=dc400820"
+        );
+
+        // Standard Name=Value form (no Cookie: prefix) — already works
+        let headers2 = parse_extra_headers(&[
+            "Cookie=a=b; c=d".to_string(),
+        ]);
+        assert_eq!(headers2[0].0, "Cookie");
+        assert_eq!(headers2[0].1, "a=b; c=d");
+
+        // Both forms produce identical output
+        let with_prefix = parse_extra_headers(&[
+            "Cookie: a=b; c=d".to_string(),
+        ]);
+        let without_prefix = parse_extra_headers(&[
+            "Cookie=a=b; c=d".to_string(),
+        ]);
+        assert_eq!(with_prefix[0].0, without_prefix[0].0);
+        assert_eq!(with_prefix[0].1, without_prefix[0].1);
+
+        // Case-insensitive prefix — key casing is preserved from input
+        let lower = parse_extra_headers(&[
+            "cookie: x=y".to_string(),
+        ]);
+        assert_eq!(lower[0].0.to_ascii_lowercase(), "cookie");
+        assert_eq!(lower[0].1, "x=y");
+
+        // Bare value without equals after Cookie: prefix
+        let bare = parse_extra_headers(&[
+            "Cookie: bare-cookie-value".to_string(),
+        ]);
+        assert_eq!(bare[0].0, "Cookie");
+        assert_eq!(bare[0].1, "bare-cookie-value");
     }
 
     #[test]
